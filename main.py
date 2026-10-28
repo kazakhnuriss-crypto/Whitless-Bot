@@ -16,6 +16,7 @@ TOKEN = os.environ.get("TOKEN")
 CREATOR_ID = int(os.environ.get("CREATOR_ID", 0))
 ZIP_URL = os.environ.get("ZIP_URL")
 CRYPTO_PAY_TOKEN = os.environ.get("CRYPTO_PAY_TOKEN")
+BOT_USERNAME = "WhitlessBot" # ⚠️ ЕГЕР БОТТЫҢ USERNAME БАСҚАША БОЛСА, ОСЫ ЖЕРДІ ӨЗГЕРТІҢІЗ (@сіздің_ботыңыз)
 
 USERS_DB = "users.db"
 CSV_FILE = "data.csv"
@@ -51,14 +52,26 @@ def prepare_data():
 def init_db():
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
+    # Негізгі кесте
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         first_name TEXT,
         is_premium INTEGER DEFAULT 0,
         premium_until INTEGER DEFAULT 0,
         is_admin INTEGER DEFAULT 0,
-        search_limit INTEGER DEFAULT 1
+        search_limit INTEGER DEFAULT 1,
+        referrer_id INTEGER DEFAULT 0,
+        ref_earnings INTEGER DEFAULT 0
     )''')
+    
+    # Ескі база болса, жаңа бағандарды қосу (Миграция)
+    try:
+        cursor.execute("ALTER TABLE users ADD COLUMN referrer_id INTEGER DEFAULT 0")
+        cursor.execute("ALTER TABLE users ADD COLUMN ref_earnings INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass # Бағандар бұрыннан бар
+
+    # Төленген счеттер кестесі
     cursor.execute('''CREATE TABLE IF NOT EXISTS processed_invoices (
         invoice_id TEXT PRIMARY KEY
     )''')
@@ -73,13 +86,15 @@ def get_user(user_id):
     conn.close()
     return user
 
-def register_user(message):
+def register_user(message, referrer_id=0):
     user = message.from_user
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM users WHERE user_id = ?", (user.id,))
     if not cursor.fetchone():
-        cursor.execute("INSERT INTO users (user_id, first_name) VALUES (?, ?)", (user.id, user.first_name))
+        # Жаңа адам. Егер реферал сілтемесімен келсе, оны сақтаймыз
+        cursor.execute("INSERT INTO users (user_id, first_name, referrer_id) VALUES (?, ?, ?)", 
+                       (user.id, user.first_name, referrer_id))
         conn.commit()
     conn.close()
 
@@ -95,6 +110,50 @@ def check_premium_status(user_id):
     if user[3] > int(time.time()):
         return True
     return False
+
+def get_ref_count(user_id):
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users WHERE referrer_id = ?", (user_id,))
+    count = cursor.fetchone()[0]
+    conn.close()
+    return count
+
+# ===== РЕФЕРАЛДЫҚ СИСТЕМА (БОНУС БЕРУ) =====
+def process_referral_bonus(buyer_id, purchase_type):
+    user = get_user(buyer_id)
+    if not user: return
+    
+    referrer_id = user[6] # referrer_id индексі
+    if referrer_id == 0 or referrer_id == buyer_id: return
+    
+    bonus = 0
+    if purchase_type == "req_10":
+        bonus = 1
+    elif purchase_type == "req_20":
+        bonus = 2
+    elif purchase_type.startswith("custom_"):
+        reqs = int(purchase_type.split('_')[1])
+        bonus = int(reqs * 0.1) # 10% округленный вниз
+    elif purchase_type.startswith("prem_"):
+        bonus = 10 # Премиум алса, 10 запрос
+        
+    if bonus > 0:
+        ref_user = get_user(referrer_id)
+        if ref_user:
+            # Рефералға запрос пен статистиканы қосамыз
+            update_user_field(referrer_id, "search_limit", ref_user[5] + bonus)
+            update_user_field(referrer_id, "ref_earnings", ref_user[7] + bonus)
+            
+            # Рефералға хабарлама жібереміз
+            try:
+                bot.send_message(
+                    referrer_id, 
+                    f"🎉 <b>Реферальный бонус!</b>\n\nВаш приглашенный друг совершил покупку.\nВам начислено: <b>+{bonus} запросов</b>!",
+                    parse_mode="HTML"
+                )
+            except:
+                pass # Егер ол ботты бұғаттап тастаса
 
 # ===== CRYPTOPAY API =====
 def create_crypto_invoice(amount, description, payload):
@@ -131,11 +190,13 @@ def check_crypto_invoice(invoice_id):
 def welcome_buttons(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(types.KeyboardButton("🔍 Поиск"), types.KeyboardButton("💎 Купить доступ"))
-    markup.row(types.KeyboardButton("🆔 Мой профиль"), types.KeyboardButton("👁 Информация"))
+    markup.row(types.KeyboardButton("👥 Рефералы"), types.KeyboardButton("🆔 Мой профиль"))
     
     user = get_user(user_id)
     if user and (user[4] == 1 or user_id == CREATOR_ID):
-        markup.row(types.KeyboardButton("⚙️ Админ-панель"))
+        markup.row(types.KeyboardButton("⚙️ Админ-панель"), types.KeyboardButton("👁 Информация"))
+    else:
+        markup.row(types.KeyboardButton("👁 Информация"))
     return markup
 
 def back_button():
@@ -143,10 +204,16 @@ def back_button():
     markup.add(types.KeyboardButton("🔙 Назад"))
     return markup
 
-# ===== СТАРТ =====
+# ===== СТАРТ (РЕФЕРАЛ СІЛТЕМЕСІН ТЕКСЕРУ) =====
 @bot.message_handler(commands=["start"])
 def start(message):
-    register_user(message)
+    referrer_id = 0
+    # Егер сілтеме арқылы келсе (мысалы: /start 123456789)
+    args = message.text.split()
+    if len(args) > 1 and args[1].isdigit():
+        referrer_id = int(args[1])
+    
+    register_user(message, referrer_id)
     text = "👋 Добро пожаловать в <b>Whitless Company</b>!\n\n✅ Бот готов к поиску."
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=welcome_buttons(message.from_user.id))
 
@@ -177,9 +244,35 @@ def my_account(message):
         f"👤 Имя: {user[1]}\n"
         f"🆔 ID: <code>{user[0]}</code>\n"
         f"📊 Статус: {status}\n"
-        f"🔍 Осталось запросов: {limit_text}"
+        f"🔍 Осталось запросов: {limit_text}\n\n"
+        f"👥 Приглашено друзей: <b>{get_ref_count(user[0])}</b>\n"
+        f"💰 Заработано с рефералов: <b>{user[7]}</b>"
     )
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=back_button())
+
+# ===== РЕФЕРАЛДЫҚ БӨЛІМ =====
+@bot.message_handler(func=lambda m: m.text == "👥 Рефералы")
+def referral_menu(message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    ref_link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
+    
+    text = (
+        "👥 <b>РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n\n"
+        "Приглашайте друзей и получайте бонусы!\n\n"
+        "🎁 <b>Ваши бонусы:</b>\n"
+        "• Если друг купит 10 запросов, вы получите <b>10%</b> (1 запрос).\n"
+        "• Если друг купит Премиум, вы получите <b>10 запросов</b>.\n\n"
+        f"👥 <b>Приглашено друзей:</b> {get_ref_count(user_id)}\n"
+        f"💰 <b>Заработано запросов:</b> {user[7]}\n\n"
+        f"🔗 <b>Ваша ссылка для приглашения:</b>\n<code>{ref_link}</code>"
+    )
+    
+    markup = types.InlineKeyboardMarkup()
+    share_btn = types.InlineKeyboardButton("📢 Поделиться ссылкой", url=f"https://t.me/share/url?url={ref_link}&text=Присоединяйся к лучшему боту для поиска!")
+    markup.add(share_btn)
+    
+    bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
 
 # ===== МАГАЗИН (CRYPTOPAY) =====
 @bot.message_handler(func=lambda m: m.text == "💎 Купить доступ")
@@ -194,7 +287,7 @@ def shop(message):
         types.InlineKeyboardButton("🌟 Премиум 7 дней - $5", callback_data="buy_prem_7"),
         types.InlineKeyboardButton("🌟 Премиум 1 месяц - $20", callback_data="buy_prem_30")
     )
-    bot.send_message(message.chat.id, "💎 <b>Магазин возможностей</b>\n\nВыберите, что хотите приобрести (оплата в USDT через CryptoBot):", parse_mode="HTML", reply_markup=markup)
+    bot.send_message(message.chat.id, "💎 <b>Магазин возможностей</b>\n\nВыберите, что хотите приобрести (оплата в USDT):", parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('buy_'))
 def process_buy(call):
@@ -229,14 +322,12 @@ def process_buy(call):
 def process_custom_buy(message):
     try:
         reqs = int(message.text.strip())
-        if reqs < 1:
-            raise ValueError
+        if reqs < 1: raise ValueError
         amount = round(reqs * 0.1, 2)
         if amount < 0.1: amount = 0.1
         
         description = f"{reqs} запросов к базе"
         payload = f"custom_{reqs}"
-        
         send_invoice(message.chat.id, amount, description, payload)
     except:
         bot.send_message(message.chat.id, "❌ Ошибка. Введите целое число больше 0.", reply_markup=back_button())
@@ -248,17 +339,16 @@ def send_invoice(chat_id, amount, description, payload):
         markup.add(types.InlineKeyboardButton("💳 Оплатить", url=invoice["bot_invoice_url"]))
         markup.add(types.InlineKeyboardButton("✅ Проверить оплату", callback_data=f"check_{invoice['invoice_id']}"))
         
-        text = f"🧾 <b>Счет создан!</b>\n\n📦 Товар: <b>{description}</b>\n💰 Сумма: <b>{amount} USDT</b>\n\n<i>Оплатите по кнопке ниже, затем нажмите 'Проверить оплату'.</i>"
+        text = f"🧾 <b>Счет создан!</b>\n\n📦 Товар: <b>{description}</b>\n💰 Сумма: <b>{amount} USDT</b>\n\n<i>Оплатите и нажмите 'Проверить оплату'.</i>"
         bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
     else:
-        bot.send_message(chat_id, "❌ Ошибка создания счета. Попробуйте позже.")
+        bot.send_message(chat_id, "❌ Ошибка создания счета.")
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_'))
 def check_payment(call):
     invoice_id = call.data.split('_')[1]
     user_id = call.from_user.id
     
-    # Тексеру: Бұл счет бұрын өңделген бе?
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_invoices WHERE invoice_id = ?", (invoice_id,))
@@ -270,17 +360,13 @@ def check_payment(call):
         bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
         return
 
-    # CryptoPay-ден тексереміз
     payload = check_crypto_invoice(invoice_id)
     
     if payload:
         user = get_user(user_id)
         
-        if payload.startswith("req_"):
-            reqs = int(payload.split('_')[1])
-            update_user_field(user_id, "search_limit", user[5] + reqs)
-            success_text = f"✅ Успешно оплачено! Вам добавлено {reqs} запросов."
-        elif payload.startswith("custom_"):
+        # Төлем түрін анықтау
+        if payload.startswith("req_") or payload.startswith("custom_"):
             reqs = int(payload.split('_')[1])
             update_user_field(user_id, "search_limit", user[5] + reqs)
             success_text = f"✅ Успешно оплачено! Вам добавлено {reqs} запросов."
@@ -292,7 +378,9 @@ def check_payment(call):
             update_user_field(user_id, "premium_until", new_prem_until)
             success_text = f"✅ Успешно оплачено! Премиум активирован на {days} дней."
         
-        # Счетті өңделді деп белгілейміз
+        # РЕФЕРАЛҒА БОНУС БЕРУ
+        process_referral_bonus(user_id, payload)
+        
         conn = sqlite3.connect(USERS_DB)
         cursor = conn.cursor()
         cursor.execute("INSERT INTO processed_invoices (invoice_id) VALUES (?)", (invoice_id,))
@@ -329,46 +417,30 @@ def process_search(message):
     is_prem = check_premium_status(user_id)
 
     if not os.path.isfile(CSV_FILE):
-        bot.send_message(message.chat.id, "⏳ База данных все еще загружается на сервер. Подождите пару минут.", reply_markup=welcome_buttons(user_id))
+        bot.send_message(message.chat.id, "⏳ База данных все еще загружается на сервер.", reply_markup=welcome_buttons(user_id))
         return
 
-    wait_msg = bot.send_message(message.chat.id, "⏳ Идет поиск по базе...")
+    wait_msg = bot.send_message(message.chat.id, "⏳ Идет поиск...")
 
     try:
         con = duckdb.connect(database=':memory:')
-        
-        # 1. Тек сандарды тазалау (Телефон немесе ИИН іздеу үшін)
         digits_only = re.sub(r'[^0-9]', '', raw_query)
         
-        # Егер іздеу сұранысының басым бөлігі сандардан тұрса (ұзындығы 5-тен көп)
         if digits_only and len(digits_only) > 5:
             sql_query = f"""
-                SELECT * FROM read_csv('{CSV_FILE}', 
-                columns={{'line': 'VARCHAR'}}, 
-                delim='\n', 
-                header=False, 
-                quote='', 
-                escape='') 
+                SELECT * FROM read_csv('{CSV_FILE}', columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') 
                 WHERE regexp_replace(line, '[^0-9]', '', 'g') LIKE ? LIMIT 5
             """
             params = [f"%{digits_only}%"]
         else:
-            # 2. Әріптермен іздеу (Аты-жөні). Бос орындарды бөлеміз.
             words = [w.lower() for w in raw_query.split() if w]
             if not words:
                 bot.send_message(message.chat.id, "❌ Введите корректный запрос.", reply_markup=welcome_buttons(user_id))
                 return
-                
             conditions = " AND ".join(["line ILIKE ?"] * len(words))
             params = [f"%{w}%" for w in words]
-            
             sql_query = f"""
-                SELECT * FROM read_csv('{CSV_FILE}', 
-                columns={{'line': 'VARCHAR'}}, 
-                delim='\n', 
-                header=False, 
-                quote='', 
-                escape='') 
+                SELECT * FROM read_csv('{CSV_FILE}', columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') 
                 WHERE {conditions} LIMIT 5
             """
         
@@ -381,7 +453,6 @@ def process_search(message):
             bot.send_message(message.chat.id, "❌ Совпадений не найдено.\n(Запрос не был потрачен).", reply_markup=welcome_buttons(user_id))
             return
 
-        # Лимитті шегеру
         if not is_prem:
             update_user_field(user_id, "search_limit", user[5] - 1)
 
@@ -408,6 +479,13 @@ def admin_panel(message):
         bot.send_message(message.chat.id, "❌ У вас нет доступа.")
         return
 
+    # Статистика
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM users")
+    total_users = cursor.fetchone()[0]
+    conn.close()
+
     markup = types.InlineKeyboardMarkup(row_width=2)
     btn_prem = types.InlineKeyboardButton("🌟 Выдать Премиум", callback_data="admin_premium")
     btn_searches = types.InlineKeyboardButton("🔍 Выдать запросы", callback_data="admin_give_searches")
@@ -417,12 +495,13 @@ def admin_panel(message):
     if user_id == CREATOR_ID:
         markup.add(btn_admin)
 
-    bot.send_message(message.chat.id, "⚙️ <b>Админ-панель</b>\n\nВыберите действие:", parse_mode="HTML", reply_markup=markup)
+    text = f"⚙️ <b>Админ-панель</b>\n\n👥 Всего пользователей: <b>{total_users}</b>\n\nВыберите действие:"
+    bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('admin_'))
 def admin_callbacks(call):
     action = call.data
-    msg = bot.send_message(call.message.chat.id, "Введите <code>ID</code> пользователя (только цифры):", parse_mode="HTML")
+    msg = bot.send_message(call.message.chat.id, "Введите <code>ID</code> пользователя:", parse_mode="HTML")
     if action == "admin_premium":
         bot.register_next_step_handler(msg, give_premium)
     elif action == "admin_add_admin":
@@ -437,7 +516,7 @@ def give_premium(message):
         update_user_field(target_id, "premium_until", new_prem_until)
         bot.send_message(message.chat.id, f"✅ Пользователю {target_id} выдан Премиум на 30 дней!", reply_markup=welcome_buttons(message.from_user.id))
     except:
-        bot.send_message(message.chat.id, "❌ Ошибка. Введите только цифры.", reply_markup=welcome_buttons(message.from_user.id))
+        bot.send_message(message.chat.id, "❌ Ошибка. Введите цифры.", reply_markup=welcome_buttons(message.from_user.id))
 
 def add_admin(message):
     try:
@@ -445,15 +524,15 @@ def add_admin(message):
         update_user_field(target_id, "is_admin", 1)
         bot.send_message(message.chat.id, f"✅ Пользователь {target_id} теперь Админ!", reply_markup=welcome_buttons(message.from_user.id))
     except:
-        bot.send_message(message.chat.id, "❌ Ошибка. Введите только цифры.", reply_markup=welcome_buttons(message.from_user.id))
+        bot.send_message(message.chat.id, "❌ Ошибка. Введите цифры.", reply_markup=welcome_buttons(message.from_user.id))
 
 def ask_search_amount(message):
     try:
         target_id = int(message.text.strip())
-        msg = bot.send_message(message.chat.id, f"Пользователь {target_id}.\nСколько запросов добавить? (Введите число):")
+        msg = bot.send_message(message.chat.id, f"Пользователь {target_id}.\nСколько запросов добавить?")
         bot.register_next_step_handler(msg, apply_searches, target_id)
     except:
-        bot.send_message(message.chat.id, "❌ Ошибка. Введите только цифры.", reply_markup=welcome_buttons(message.from_user.id))
+        bot.send_message(message.chat.id, "❌ Ошибка.", reply_markup=welcome_buttons(message.from_user.id))
 
 def apply_searches(message, target_id):
     try:
@@ -466,12 +545,12 @@ def apply_searches(message, target_id):
             new_limit = result[0] + amount
             cursor.execute("UPDATE users SET search_limit = ? WHERE user_id = ?", (new_limit, target_id))
             conn.commit()
-            bot.send_message(message.chat.id, f"✅ Пользователю {target_id} добавлено {amount} запросов.\nТеперь у него: {new_limit} запросов.", reply_markup=welcome_buttons(message.from_user.id))
+            bot.send_message(message.chat.id, f"✅ Пользователю {target_id} добавлено {amount} запросов.\nТеперь у него: {new_limit}.", reply_markup=welcome_buttons(message.from_user.id))
         else:
             bot.send_message(message.chat.id, "❌ Пользователь не найден.", reply_markup=welcome_buttons(message.from_user.id))
         conn.close()
     except:
-        bot.send_message(message.chat.id, "❌ Ошибка. Введите только цифры.", reply_markup=welcome_buttons(message.from_user.id))
+        bot.send_message(message.chat.id, "❌ Ошибка.", reply_markup=welcome_buttons(message.from_user.id))
 
 # ===== НАЗАД =====
 @bot.message_handler(func=lambda m: m.text == "🔙 Назад")
