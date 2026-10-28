@@ -17,7 +17,7 @@ CREATOR_ID = int(os.environ.get("CREATOR_ID", 0))
 ZIP_URL = os.environ.get("ZIP_URL")
 CRYPTO_PAY_TOKEN = os.environ.get("CRYPTO_PAY_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-BOT_USERNAME = "WhitlessBot" # Егер боттың аты басқаша болса, өзгертіңіз
+BOT_USERNAME = "WhitlessNet_Bot" # ⚠️ Егер боттың аты басқаша болса, осында өзгертіңіз
 
 CSV_FILE = "data.csv"
 ZIP_FILE = "data.zip"
@@ -50,7 +50,9 @@ def prepare_data():
 
 # ===== БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ (PostgreSQL) =====
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    # ?sslmode=require қатесін автоматты түрде тазалау
+    clean_url = DATABASE_URL.replace("?sslmode=require", "").replace("&sslmode=require", "")
+    return psycopg2.connect(clean_url)
 
 def init_db():
     conn = get_db_connection()
@@ -481,7 +483,7 @@ if __name__ == "__main__":
     if not all([TOKEN, CREATOR_ID, ZIP_URL, CRYPTO_PAY_TOKEN, DATABASE_URL]):
         print("❌ ОШИБКА: Проверьте переменные в Railway! (DATABASE_URL тоже должен быть)")
     else:
-        init_db() # Бұл функция кестені өзі жасайды
+        init_db()
         prepare_data()
         print("Whitless Company Bot запущен (PostgreSQL)!")
         bot.infinity_polling(skip_pending=True, timeout=30)
