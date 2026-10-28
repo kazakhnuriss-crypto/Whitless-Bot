@@ -14,39 +14,33 @@ from datetime import datetime
 # ===== НАСТРОЙКИ =====
 TOKEN = os.environ.get("TOKEN")
 CREATOR_ID = int(os.environ.get("CREATOR_ID", 0))
-ZIP_URL_1 = os.environ.get("ZIP_URL")       # 1-ші базаның сілтемесі
-ZIP_URL_2 = os.environ.get("ZIP_URL_2")     # 2-ші базаның сілтемесі
+ZIP_URL_1 = os.environ.get("ZIP_URL")
+ZIP_URL_2 = os.environ.get("ZIP_URL_2")
 CRYPTO_PAY_TOKEN = os.environ.get("CRYPTO_PAY_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-BOT_USERNAME = "WhitlessNet_Bot" # ⚠️ Егер боттың аты басқаша болса, өзгертіңіз
+BOT_USERNAME = "WhitlessNet_Bot" # ⚠️ Егер боттың аты басқаша болса, осында өзгертіңіз
 
 bot = telebot.TeleBot(TOKEN)
 
 # ===== ФАЙЛДАРДЫ ЖҮКТЕУ ЖӘНЕ АШУ =====
 def prepare_data():
-    # 1-ші базаны дайындау
-    if not os.path.exists("db1"):
-        os.makedirs("db1")
+    if not os.path.exists("db1"): os.makedirs("db1")
     if not glob.glob("db1/*.csv"):
         print("⏳ Загрузка Базы 1...")
         try:
             urllib.request.urlretrieve(ZIP_URL_1, "db1.zip")
-            with zipfile.ZipFile("db1.zip", 'r') as zip_ref:
-                zip_ref.extractall("db1")
+            with zipfile.ZipFile("db1.zip", 'r') as zip_ref: zip_ref.extractall("db1")
             os.remove("db1.zip")
             print("✅ База 1 готова!")
         except Exception as e: print(f"❌ Ошибка Базы 1: {e}")
 
-    # 2-ші базаны дайындау
     if ZIP_URL_2:
-        if not os.path.exists("db2"):
-            os.makedirs("db2")
+        if not os.path.exists("db2"): os.makedirs("db2")
         if not glob.glob("db2/*.csv"):
             print("⏳ Загрузка Базы 2...")
             try:
                 urllib.request.urlretrieve(ZIP_URL_2, "db2.zip")
-                with zipfile.ZipFile("db2.zip", 'r') as zip_ref:
-                    zip_ref.extractall("db2")
+                with zipfile.ZipFile("db2.zip", 'r') as zip_ref: zip_ref.extractall("db2")
                 os.remove("db2.zip")
                 print("✅ База 2 готова!")
             except Exception as e: print(f"❌ Ошибка Базы 2: {e}")
@@ -60,53 +54,37 @@ def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
-        user_id BIGINT PRIMARY KEY,
-        first_name TEXT,
-        is_premium INTEGER DEFAULT 0,
-        premium_until INTEGER DEFAULT 0,
-        is_admin INTEGER DEFAULT 0,
-        search_limit INTEGER DEFAULT 1,
-        referrer_id BIGINT DEFAULT 0,
-        ref_earnings INTEGER DEFAULT 0,
-        is_banned INTEGER DEFAULT 0
+        user_id BIGINT PRIMARY KEY, first_name TEXT, is_premium INTEGER DEFAULT 0,
+        premium_until INTEGER DEFAULT 0, is_admin INTEGER DEFAULT 0, search_limit INTEGER DEFAULT 1,
+        referrer_id BIGINT DEFAULT 0, ref_earnings INTEGER DEFAULT 0, is_banned INTEGER DEFAULT 0
     )''')
     try: cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned INTEGER DEFAULT 0")
     except: pass
     cursor.execute('''CREATE TABLE IF NOT EXISTS processed_invoices (invoice_id TEXT PRIMARY KEY)''')
-    conn.commit()
-    cursor.close()
-    conn.close()
+    conn.commit(); cursor.close(); conn.close()
 
 def get_user(user_id):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT * FROM users WHERE user_id = %s", (user_id,))
-    user = cursor.fetchone()
-    cursor.close()
-    conn.close()
+    user = cursor.fetchone(); cursor.close(); conn.close()
     return user
 
 def register_user(message, referrer_id=0):
     user = message.from_user
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT user_id FROM users WHERE user_id = %s", (user.id,))
     if not cursor.fetchone():
-        cursor.execute("INSERT INTO users (user_id, first_name, referrer_id) VALUES (%s, %s, %s)", 
-                       (user.id, user.first_name, referrer_id))
+        cursor.execute("INSERT INTO users (user_id, first_name, referrer_id) VALUES (%s, %s, %s)", (user.id, user.first_name, referrer_id))
         conn.commit()
-    cursor.close()
-    conn.close()
+    cursor.close(); conn.close()
 
 def update_user_field(user_id, field, value):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = get_db_connection(); cursor = conn.cursor()
     allowed_fields = ['is_premium', 'premium_until', 'is_admin', 'search_limit', 'referrer_id', 'ref_earnings', 'is_banned']
     if field in allowed_fields:
         cursor.execute(f"UPDATE users SET {field} = %s WHERE user_id = %s", (value, user_id))
         conn.commit()
-    cursor.close()
-    conn.close()
+    cursor.close(); conn.close()
 
 def check_premium_status(user_id):
     user = get_user(user_id)
@@ -157,7 +135,6 @@ def check_crypto_invoice(invoice_id):
 # ===== КЛАВИАТУРАЛАР =====
 def welcome_buttons(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    # 3 ТҮРЛІ ІЗДЕУ БАТЫРМАСЫ
     markup.row(types.KeyboardButton("🔍 База 1"), types.KeyboardButton("🔍 База 2"))
     markup.row(types.KeyboardButton("🌟 Обе Базы (Premium)"))
     markup.row(types.KeyboardButton("💎 Купить доступ"), types.KeyboardButton("👥 Рефералы"))
@@ -271,8 +248,7 @@ def send_invoice(chat_id, amount, description, payload):
 def check_payment(call):
     invoice_id = call.data.split('_')[1]
     user_id = call.from_user.id
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_invoices WHERE invoice_id = %s", (invoice_id,))
     if cursor.fetchone():
         cursor.close(); conn.close()
@@ -301,7 +277,7 @@ def check_payment(call):
         bot.send_message(call.message.chat.id, success_text)
     else: bot.answer_callback_query(call.id, "❌ Оплата не поступила.", show_alert=True)
 
-# ===== ІЗДЕУ ЛОГИКАСЫ (3 ТҮРЛІ) =====
+# ===== ІЗДЕУ ЛОГИКАСЫ =====
 @bot.message_handler(func=lambda m: m.text in ["🔍 База 1", "🔍 База 2", "🌟 Обе Базы (Premium)"])
 def search_init(message):
     user_id = message.from_user.id
@@ -309,17 +285,59 @@ def search_init(message):
     if user[8] == 1: return
     
     is_prem = check_premium_status(user_id)
-    
     if message.text == "🌟 Обе Базы (Premium)" and not is_prem:
         bot.send_message(message.chat.id, "❌ Поиск по двум базам доступен только для <b>Премиум</b> пользователей!", parse_mode="HTML", reply_markup=back_button())
         return
-        
     if not is_prem and user[5] <= 0:
         bot.send_message(message.chat.id, "❌ Закончились запросы.", reply_markup=back_button())
         return
 
     msg = bot.send_message(message.chat.id, "🔍 Введите номер, ФИО или ИИН:", reply_markup=back_button())
     bot.register_next_step_handler(msg, process_search, message.text)
+
+# АҚЫЛДЫ ФОРМАТТАУШЫ ФУНКЦИЯ
+def format_smart_data(raw_line):
+    # Бөлгішті анықтау (үтір немесе нүктелі үтір)
+    delimiter = ';' if raw_line.count(';') > raw_line.count(',') else ','
+    parts = [p.strip().replace('"', '') for p in raw_line.split(delimiter) if p.strip()]
+    
+    formatted = []
+    for p in parts:
+        p_upper = p.upper()
+        
+        # 1. Мекенжай (Область, Город, Улица т.б.)
+        if any(w in p_upper for w in ["ОБЛАСТЬ", "ГОРОД", "РАЙОН", "УЛИЦА", "ДОМ", "МИКРОРАЙОН", "АУЛ", "СЕЛО", "РЕСПУБЛИКА", "КНР", "КАЗАХСТАН", "ПРОСПЕКТ", "ПЕР."]):
+            formatted.append(f"📍 <b>Адрес:</b> {p}")
+            
+        # 2. Жынысы
+        elif p_upper in ["МУЖСКОЙ", "ЖЕНСКИЙ", "М", "Ж"]:
+            formatted.append(f"🚻 <b>Пол:</b> {p}")
+            
+        # 3. Телефон нөмірі (+7, 8, скобка немесе сызықша бар сандар)
+        elif re.match(r'^[\+\d][\d\s\-\(\)]{8,}$', p) and not re.match(r'^\d{10,14}$', p):
+            formatted.append(f"📞 <b>Номер:</b> <code>{p}</code>")
+            
+        # 4. Туған күні (Дата)
+        elif re.match(r'^\d{4}-\d{2}-\d{2}', p) or re.match(r'^\d{2}[\.\-\/]\d{2}[\.\-\/]\d{4}', p):
+            formatted.append(f"📅 <b>Дата рож:</b> {p}")
+            
+        # 5. ИИН / Паспорт (Тек қана 10-14 саннан тұрса)
+        elif p.isdigit() and 10 <= len(p) <= 14:
+            formatted.append(f"🆔 <b>ИИН/Паспорт:</b> <code>{p}</code>")
+            
+        # 6. Жүйелік деректер (TRUE/FALSE немесе уақыты бар дата)
+        elif "TRUE" in p_upper or "FALSE" in p_upper or re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}', p):
+            formatted.append(f"⚙️ <b>Статус:</b> {p}")
+            
+        # 7. ФИО (Егер әріптерден тұрса және цифр болмаса)
+        elif re.match(r'^[А-Яа-яЁёҚқҒғҮүҰұӨөӘәІіҢң\s\-]+$', p) and not any(c.isdigit() for c in p):
+            formatted.append(f"👤 <b>ФИО/Имя:</b> {p}")
+            
+        # 8. Қалғандары
+        else:
+            formatted.append(f"📌 <b>Данные:</b> {p}")
+            
+    return "\n".join(formatted)
 
 def process_search(message, search_mode):
     if not message.text or message.text == "🔙 Назад":
@@ -331,15 +349,12 @@ def process_search(message, search_mode):
     user = get_user(user_id)
     is_prem = check_premium_status(user_id)
 
-    if search_mode == "🔍 База 1":
-        files_to_search = glob.glob("db1/*.csv")
-    elif search_mode == "🔍 База 2":
-        files_to_search = glob.glob("db2/*.csv")
-    else: # Обе базы
-        files_to_search = glob.glob("db1/*.csv") + glob.glob("db2/*.csv")
+    if search_mode == "🔍 База 1": files_to_search = glob.glob("db1/*.csv")
+    elif search_mode == "🔍 База 2": files_to_search = glob.glob("db2/*.csv")
+    else: files_to_search = glob.glob("db1/*.csv") + glob.glob("db2/*.csv")
 
     if not files_to_search:
-        bot.send_message(message.chat.id, "⏳ База загружается или не найдена на сервере...", reply_markup=welcome_buttons(user_id))
+        bot.send_message(message.chat.id, "⏳ База загружается...", reply_markup=welcome_buttons(user_id))
         return
 
     wait_msg = bot.send_message(message.chat.id, f"⏳ Идет поиск ({search_mode})...")
@@ -347,7 +362,6 @@ def process_search(message, search_mode):
     try:
         con = duckdb.connect(database=':memory:')
         digits_only = re.sub(r'[^0-9]', '', raw_query)
-        
         files_str = "[" + ", ".join([f"'{f}'" for f in files_to_search]) + "]"
         
         if digits_only and len(digits_only) > 5:
@@ -364,7 +378,6 @@ def process_search(message, search_mode):
         
         result = con.execute(sql_query, params).fetchall()
         con.close()
-
         bot.delete_message(message.chat.id, wait_msg.message_id)
 
         if not result:
@@ -375,15 +388,8 @@ def process_search(message, search_mode):
 
         results_texts = []
         for row in result:
-            parts = [p.strip().replace('"', '') for p in row[0].split(',')]
-            formatted = []
-            for p in parts:
-                if not p: continue
-                if len(p) >= 9 and re.match(r'^[\d\+\s\-\(\)]+$', p): formatted.append(f"📞 <b>Номер:</b> <code>{p}</code>")
-                elif re.match(r'\d{2}[\.\-\/]\d{2}[\.\-\/]\d{4}', p): formatted.append(f"📅 <b>Дата рож:</b> {p}")
-                elif len(p.split()) >= 2 and not any(c.isdigit() for c in p): formatted.append(f"👤 <b>ФИО:</b> {p}")
-                else: formatted.append(f"📌 <b>Данные:</b> {p}")
-            results_texts.append("\n".join(formatted))
+            # Жаңа ақылды функцияны шақырамыз
+            results_texts.append(format_smart_data(row[0]))
 
         final_text = f"✅ <b>РЕЗУЛЬТАТЫ ({search_mode}):</b>\n\n" + "\n\n➖➖➖➖➖➖➖➖➖\n\n".join(results_texts)
         bot.send_message(message.chat.id, final_text, parse_mode="HTML", reply_markup=welcome_buttons(user_id))
@@ -485,5 +491,5 @@ if __name__ == "__main__":
     else:
         init_db()
         prepare_data()
-        print("Whitless Company Bot запущен (2 базы, 3 режима поиска)!")
+        print("Whitless Company Bot запущен (Умный поиск)!")
         bot.infinity_polling(skip_pending=True, timeout=30)
