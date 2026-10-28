@@ -8,7 +8,7 @@ import zipfile
 import glob
 import requests
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
 
 # ===== НАСТРОЙКИ =====
 TOKEN = os.environ.get("TOKEN")
@@ -50,7 +50,6 @@ def prepare_data():
 def init_db():
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
-    # premium_until - уақытты UNIX форматында сақтаймыз
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id INTEGER PRIMARY KEY,
         first_name TEXT,
@@ -58,6 +57,10 @@ def init_db():
         premium_until INTEGER DEFAULT 0,
         is_admin INTEGER DEFAULT 0,
         search_limit INTEGER DEFAULT 1
+    )''')
+    # Төленген счеттерді қайталап тексермеу үшін жаңа кесте
+    cursor.execute('''CREATE TABLE IF NOT EXISTS processed_invoices (
+        invoice_id TEXT PRIMARY KEY
     )''')
     conn.commit()
     conn.close()
@@ -89,7 +92,7 @@ def update_user_field(user_id, field, value):
 
 def check_premium_status(user_id):
     user = get_user(user_id)
-    if user[3] > int(time.time()): # Егер премиум уақыты өтпеген болса
+    if user[3] > int(time.time()):
         return True
     return False
 
@@ -119,10 +122,10 @@ def check_crypto_invoice(invoice_id):
         if response.get("ok") and response["result"]["items"]:
             invoice = response["result"]["items"][0]
             if invoice["status"] == "paid":
-                return True
+                return invoice.get("payload", "")
     except Exception as e:
         print("CryptoPay Check Error:", e)
-    return False
+    return None
 
 # ===== КЛАВИАТУРЫ =====
 def welcome_buttons(user_id):
@@ -164,7 +167,6 @@ def my_account(message):
     if is_prem:
         status = "🌟 Премиум"
         limit_text = "♾ Безлимит"
-        # Премиум қашан бітетінін көрсету
         prem_date = datetime.fromtimestamp(user[3]).strftime('%d.%m.%Y %H:%M')
         limit_text += f" (до {prem_date})"
     elif user[4] == 1 or user[0] == CREATOR_ID:
@@ -187,7 +189,7 @@ def shop(message):
         types.InlineKeyboardButton("10 запросов - $1", callback_data="buy_req_10"),
         types.InlineKeyboardButton("20 запросов - $2", callback_data="buy_req_20")
     )
-    markup.add(types.InlineKeyboardButton("✍️ Свое количество", callback_data="buy_custom"))
+    markup.add(types.InlineKeyboardButton("✍️ Свое количество ($0.1/шт)", callback_data="buy_custom"))
     markup.add(
         types.InlineKeyboardButton("🌟 Премиум 7 дней - $5", callback_data="buy_prem_7"),
         types.InlineKeyboardButton("🌟 Премиум 1 месяц - $20", callback_data="buy_prem_30")
@@ -197,8 +199,6 @@ def shop(message):
 @bot.callback_query_handler(func=lambda call: call.data.startswith('buy_'))
 def process_buy(call):
     action = call.data
-    user_id = call.from_user.id
-    
     amount = 0
     description = ""
     payload = ""
@@ -220,7 +220,7 @@ def process_buy(call):
         description = "Премиум на 30 дней"
         payload = "prem_30"
     elif action == "buy_custom":
-        msg = bot.send_message(call.message.chat.id, "Введите желаемое количество запросов (цена: $0.1 за 1 запрос):")
+        msg = bot.send_message(call.message.chat.id, "Введите желаемое количество запросов:")
         bot.register_next_step_handler(msg, process_custom_buy)
         return
 
@@ -231,7 +231,7 @@ def process_custom_buy(message):
         reqs = int(message.text.strip())
         if reqs < 1:
             raise ValueError
-        amount = round(reqs * 0.1, 2) # 1 запрос = 10 центров
+        amount = round(reqs * 0.1, 2)
         if amount < 0.1: amount = 0.1
         
         description = f"{reqs} запросов к базе"
@@ -248,12 +248,10 @@ def send_invoice(chat_id, amount, description, payload):
         markup.add(types.InlineKeyboardButton("💳 Оплатить", url=invoice["bot_invoice_url"]))
         markup.add(types.InlineKeyboardButton("✅ Проверить оплату", callback_data=f"check_{invoice['invoice_id']}"))
         
-        bot.send_message(
-            chat_id, 
-            f"🧾 <b>Счет создан!</b>\n\n{item_desc(description)}\n💰 Сумма: <b>{amount} USDT</b>\n\n<i>Оплатите по кнопке ниже, затем нажмите "Проверить оплату".</i>",
-            parse_mode="HTML",
-            reply_markup=markup
-        )
+        # Тырнақша қатесі осы жерде түзетілді
+        text = f"🧾 <b>Счет создан!</b>\n\n📦 Товар: <b>{description}</b>\n💰 Сумма: <b>{amount} USDT</b>\n\n<i>Оплатите по кнопке ниже, затем нажмите 'Проверить оплату'.</i>"
+        
+        bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
     else:
         bot.send_message(chat_id, "❌ Ошибка создания счета. Попробуйте позже.")
 
@@ -262,47 +260,58 @@ def check_payment(call):
     invoice_id = call.data.split('_')[1]
     user_id = call.from_user.id
     
-    if check_crypto_invoice(invoice_id):
-        # Төлем сәтті өтті! Енді деректерді жаңартамыз.
-        # Бірақ біз қанша сұраныс сатып алынғанын білуіміз керек. 
-        # Ол үшін бізге CryptoPay-ден invoice-тың payload-ын алу керек.
-        # Оңай жолы: инвойс жасалғанда payload-ты базаға сақтау.
-        # Бұл жерде біз жеңілдетілген нұсқаны жасаймыз: инвойсты тексеріп, бірақ нақты сомасын білмеймін.
-        # Сондықтан, "check_" батырмасын басқанда, қайта сұраныс жасап, payload-ты аламыз.
+    # 1. Тексеру: Бұл счет бұрын өңделген бе? (Қайталап басуға қарсы)
+    conn = sqlite3.connect(USERS_DB)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM processed_invoices WHERE invoice_id = ?", (invoice_id,))
+    already_processed = cursor.fetchone()
+    conn.close()
+
+    if already_processed:
+        bot.answer_callback_query(call.id, "✅ Вы уже получили товар по этому счету!", show_alert=True)
+        # Пернетақтаны өшіреміз
+        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
+        return
+
+    # 2. Егер өңделмеген болса, CryptoPay-ден тексереміз
+    payload = check_crypto_invoice(invoice_id)
+    
+    if payload:
+        user = get_user(user_id)
         
-        url = f"https://pay.crypt.bot/api/getInvoices?invoice_ids={invoice_id}"
-        headers = {"Crypto-Pay-API-Token": CRYPTO_PAY_TOKEN}
-        res = requests.get(url, headers=headers).json()
+        # 3. Төлем түрін анықтап, балансты жаңартамыз
+        if payload.startswith("req_"):
+            reqs = int(payload.split('_')[1])
+            update_user_field(user_id, "search_limit", user[5] + reqs)
+            success_text = f"✅ Успешно оплачено! Вам добавлено {reqs} запросов."
+            
+        elif payload.startswith("custom_"):
+            reqs = int(payload.split('_')[1])
+            update_user_field(user_id, "search_limit", user[5] + reqs)
+            success_text = f"✅ Успешно оплачено! Вам добавлено {reqs} запросов."
+            
+        elif payload.startswith("prem_"):
+            days = int(payload.split('_')[1])
+            new_prem_until = int(time.time()) + (days * 24 * 60 * 60)
+            if user[3] > int(time.time()):
+                new_prem_until = user[3] + (days * 24 * 60 * 60)
+                
+            update_user_field(user_id, "premium_until", new_prem_until)
+            success_text = f"✅ Успешно оплачено! Премиум активирован на {days} дней."
         
-        if res.get("ok") and res["result"]["items"]:
-            payload = res["result"]["items"][0].get("payload", "")
-            
-            user = get_user(user_id)
-            
-            if payload.startswith("req_"):
-                reqs = int(payload.split('_')[1])
-                update_user_field(user_id, "search_limit", user[5] + reqs)
-                bot.edit_message_text(f"✅ Успешно оплачено! Вам добавлено {reqs} запросов.", call.message.chat.id, call.message.message_id)
-                
-            elif payload.startswith("custom_"):
-                reqs = int(payload.split('_')[1])
-                update_user_field(user_id, "search_limit", user[5] + reqs)
-                bot.edit_message_text(f"✅ Успешно оплачено! Вам добавлено {reqs} запросов.", call.message.chat.id, call.message.message_id)
-                
-            elif payload.startswith("prem_"):
-                days = int(payload.split('_')[1])
-                new_prem_until = int(time.time()) + (days * 24 * 60 * 60)
-                # Егер қазірдің өзінде премиум болса, үстіне қосамыз
-                if user[3] > int(time.time()):
-                    new_prem_until = user[3] + (days * 24 * 60 * 60)
-                    
-                update_user_field(user_id, "premium_until", new_prem_until)
-                bot.edit_message_text(f"✅ Успешно оплачено! Премиум активирован на {days} дней.", call.message.chat.id, call.message.message_id)
+        # 4. Счетті өңделді деп белгілейміз
+        conn = sqlite3.connect(USERS_DB)
+        cursor = conn.cursor()
+        cursor.execute("INSERT INTO processed_invoices (invoice_id) VALUES (?)", (invoice_id,))
+        conn.commit()
+        conn.close()
+        
+        # Пернетақтаны өшіріп, сәттілік туралы хабарлама жазамыз
+        bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
+        bot.send_message(call.message.chat.id, success_text)
+        
     else:
         bot.answer_callback_query(call.id, "❌ Оплата еще не поступила.", show_alert=True)
-
-def item_desc(desc):
-    return f"📦 Товар: <b>{desc}</b>"
 
 # ===== ПОИСК =====
 @bot.message_handler(func=lambda m: m.text == "🔍 Поиск")
@@ -332,13 +341,11 @@ def process_search(message):
         bot.send_message(message.chat.id, "⏳ База данных все еще загружается на сервер. Подождите пару минут.", reply_markup=welcome_buttons(user_id))
         return
 
-    wait_msg = bot.send_message(message.chat.id, "⏳ Идет поиск по базе... (может занять до 10 сек)")
+    wait_msg = bot.send_message(message.chat.id, "⏳ Идет поиск по базе...")
 
     try:
-        # Сөздерді бөліп аламыз (мыс: "Абай Нұрасыл" -> ["абай", "нұрасыл"])
+        # Бос орынмен іздеу логикасы (сөздерді бөліп, бәрі қатар кездесуі керек)
         words = query.split()
-        
-        # SQL сұранысын құрамыз: барлық сөздер жолда кездесуі керек (AND)
         conditions = " AND ".join(["line ILIKE ?"] * len(words))
         params = [f"%{w}%" for w in words]
         
@@ -414,7 +421,6 @@ def admin_callbacks(call):
 def give_premium(message):
     try:
         target_id = int(message.text.strip())
-        # 30 күнге премиум береміз
         new_prem_until = int(time.time()) + (30 * 24 * 60 * 60)
         update_user_field(target_id, "premium_until", new_prem_until)
         bot.send_message(message.chat.id, f"✅ Пользователю {target_id} выдан Премиум на 30 дней!", reply_markup=welcome_buttons(message.from_user.id))
