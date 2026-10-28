@@ -3,33 +3,40 @@ import sqlite3
 import telebot
 from telebot import types
 import duckdb
-from pyrogram import Client
+import urllib.request
+import zipfile
 
-# ===== НАСТРОЙКИ =====
-TOKEN = "9044494571:AAGU3GiqKpUH-9oPFC3TDU4jaN3RufdEaqs"
-CREATOR_ID = 737166986
+# ===== НАСТРОЙКИ (Барлығы Railway-дің Variables ішінен алынады) =====
+TOKEN = os.environ.get("TOKEN")
+CREATOR_ID = int(os.environ.get("CREATOR_ID", 0))
+ZIP_URL = os.environ.get("ZIP_URL")
+
 USERS_DB = "users.db"
 CSV_FILE = "base2.csv"
-
-# ⚠️ ОСЫ ЖЕРГЕ TELEGRAM-НАН АЛҒАН API_ID ЖӘНЕ API_HASH-ТЫ ҚОЯСЫЗ
-# (my.telegram.org сайтынан алуға болады, бұл тегін)
-API_ID = 1234567 
-API_HASH = "your_api_hash_here"
+ZIP_FILE = "base2.zip"
 
 bot = telebot.TeleBot(TOKEN)
 
-# ===== ФАЙЛДЫ TELEGRAM-НАН ЖҮКТЕУ (Pyrogram арқылы) =====
-def download_file_from_telegram():
+# ===== ФАЙЛДЫ ЖҮКТЕУ ЖӘНЕ АШУ =====
+def prepare_data():
     if os.path.exists(CSV_FILE):
+        print("✅ Файл базасы дайын.")
         return
-    print("⏳ Файл базасы Telegram-нан жүктелуде...")
-    # Мұнда сіз файлды өзіңіздің Telegram аккаунтыңызға жіберіп, сол хабарламаның сілтемесін қоюыңыз керек
-    # Мысалы: https://t.me/c/123456789/1
-    # Бұл жерде біз Pyrogram-ды қолданып, файлды жүктейміз
-    # (Бұл функцияны іске қосу үшін сізге API_ID және API_HASH керек)
-    pass # Толық код төменде
 
-# ===== БАЗА ДЛЯ ПОЛЬЗОВАТЕЛЕЙ =====
+    print("⏳ Файл GitHub-тан жүктелуде (бұл бірнеше минут алуы мүмкін)...")
+    try:
+        urllib.request.urlretrieve(ZIP_URL, ZIP_FILE)
+        print("✅ Жүктеу аяқталды. Архив ашылуда...")
+        
+        with zipfile.ZipFile(ZIP_FILE, 'r') as zip_ref:
+            zip_ref.extractall(".") 
+            
+        print("✅ Архив ашылды! База дайын.")
+        os.remove(ZIP_FILE)
+    except Exception as e:
+        print(f"❌ Файлды жүктеу қатесі: {e}")
+
+# ===== ҚОЛДАНУШЫЛАР БАЗАСЫ =====
 def init_db():
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
@@ -73,6 +80,7 @@ def welcome_buttons(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(types.KeyboardButton("🔍 Поиск"), types.KeyboardButton("👁 Информация"))
     markup.row(types.KeyboardButton("🆔 Мой аккаунт"))
+    
     user = get_user(user_id)
     if user and (user[3] == 1 or user_id == CREATOR_ID):
         markup.row(types.KeyboardButton("⚙️ Админ-панель"))
@@ -83,7 +91,7 @@ def back_button():
     markup.add(types.KeyboardButton("🔙 Назад"))
     return markup
 
-# ===== БОТТЫҢ БАСТАЛУЫ =====
+# ===== СТАРТ =====
 @bot.message_handler(commands=["start"])
 def start(message):
     register_user(message)
@@ -92,17 +100,20 @@ def start(message):
 
 @bot.message_handler(func=lambda m: m.text == "👁 Информация")
 def info(message):
-    text = "ℹ️ <b>ИНФОРМАЦИЯ</b>\n\n🏢 Компания: <b>Whitless Company</b>\n🤖 Поиск по базе."
+    text = "ℹ️ <b>ИНФОРМАЦИЯ</b>\n\n🏢 Компания: <b>Whitless Company</b>\n🤖 Умный поиск по базе."
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=back_button())
 
 @bot.message_handler(func=lambda m: m.text == "🆔 Мой аккаунт")
 def my_account(message):
     register_user(message)
     user = get_user(message.from_user.id)
+    
     status = "👤 Обычный"
     if user[2] == 1: status = "🌟 Премиум"
     if user[3] == 1 or user[0] == CREATOR_ID: status = "👑 Создатель"
+
     limit_text = "♾ Шексіз" if user[2] == 1 else f"{user[4]} рет"
+    
     text = (
         f"🆔 <b>МОЙ АККАУНТ</b>\n\n"
         f"👤 Имя: {user[1]}\n"
@@ -112,13 +123,13 @@ def my_account(message):
     )
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=back_button())
 
-# ===== ІЗДЕУ (DuckDB арқылы) =====
+# ===== ПОИСК =====
 @bot.message_handler(func=lambda m: m.text == "🔍 Поиск")
 def search(message):
     register_user(message)
     user = get_user(message.from_user.id)
     if user[2] == 0 and user[4] <= 0:
-        bot.send_message(message.chat.id, "❌ У вас закончились бесплатные поиски.\nОбратитесь к админу.", reply_markup=back_button())
+        bot.send_message(message.chat.id, "❌ У вас закончились бесплатные поиски.", reply_markup=back_button())
         return
     msg = bot.send_message(message.chat.id, "🔍 Введите номер, ФИО или ИИН для поиска:", reply_markup=back_button())
     bot.register_next_step_handler(msg, process_search)
@@ -133,16 +144,13 @@ def process_search(message):
     user = get_user(user_id)
 
     if not os.path.isfile(CSV_FILE):
-        bot.send_message(message.chat.id, "❌ Файл базы не найден! Подождите загрузку.", reply_markup=welcome_buttons(user_id))
+        bot.send_message(message.chat.id, "⏳ Файл базы все еще загружается на сервер. Подождите 2-3 минуты.", reply_markup=welcome_buttons(user_id))
         return
 
-    wait_msg = bot.send_message(message.chat.id, "⏳ Идет поиск по базе...\n(Это займет 2-5 секунд)")
+    wait_msg = bot.send_message(message.chat.id, "⏳ Идет поиск по базе... (2-5 секунд)")
 
     try:
-        # DuckDB арқылы іздеу (телефонды қыздырмайды, жадты толтырмайды)
         con = duckdb.connect(database=':memory:')
-        
-        # Файлды оқу (үтірлер мен тырнақшаларды елемейді)
         sql_query = f"""
             SELECT * FROM read_csv('{CSV_FILE}', 
             columns={{'line': 'VARCHAR'}}, 
@@ -159,32 +167,25 @@ def process_search(message):
         bot.delete_message(message.chat.id, wait_msg.message_id)
 
         if not result:
-            bot.send_message(message.chat.id, "❌ Совпадений не найдено.\n(Ваш лимит поиска не был потрачен).", reply_markup=welcome_buttons(user_id))
+            bot.send_message(message.chat.id, "❌ Совпадений не найдено.\n(Лимит не потрачен).", reply_markup=welcome_buttons(user_id))
             return
 
         if user[2] == 0:
             update_user_field(user_id, "search_limit", user[4] - 1)
 
-        # Нәтижелерді әдемілеу
         results_texts = []
         for row in result:
             line = row[0]
             parts = line.split(',')
-            formatted_lines = []
-            for j, p in enumerate(parts):
-                p = p.strip().replace('"', '')
-                if p:
-                    formatted_lines.append(f"▫️ <b>Дерек {j+1}:</b> {p}")
+            formatted_lines = [f"▫️ <b>Дерек {j+1}:</b> {p.strip().replace('\"', '')}" for j, p in enumerate(parts) if p.strip().replace('\"', '')]
             results_texts.append("\n".join(formatted_lines))
 
-        final_text = "✅ <b>РЕЗУЛЬТАТЫ ПОИСКА:</b>\n\n"
-        final_text += "\n\n➖➖➖➖➖➖➖➖➖\n\n".join(results_texts)
-
+        final_text = "✅ <b>РЕЗУЛЬТАТЫ ПОИСКА:</b>\n\n" + "\n\n➖➖➖➖➖➖➖➖➖\n\n".join(results_texts)
         bot.send_message(message.chat.id, final_text, parse_mode="HTML", reply_markup=welcome_buttons(user_id))
 
     except Exception as e:
         print("Ошибка DuckDB:", e)
-        bot.send_message(message.chat.id, "❌ Ошибка при поиске. Попробуйте позже.", reply_markup=welcome_buttons(user_id))
+        bot.send_message(message.chat.id, "❌ Ошибка при поиске.", reply_markup=welcome_buttons(user_id))
 
 # ===== АДМИН ПАНЕЛЬ =====
 @bot.message_handler(func=lambda m: m.text == "⚙️ Админ-панель")
@@ -199,6 +200,7 @@ def admin_panel(message):
     btn_prem = types.InlineKeyboardButton("🌟 Выдать Премиум", callback_data="admin_premium")
     btn_searches = types.InlineKeyboardButton("🔍 Выдать поиски", callback_data="admin_give_searches")
     btn_admin = types.InlineKeyboardButton("🛡 Сделать Админом", callback_data="admin_add_admin")
+    
     markup.add(btn_prem, btn_searches)
     if user_id == CREATOR_ID:
         markup.add(btn_admin)
@@ -253,19 +255,22 @@ def apply_searches(message, target_id):
             conn.commit()
             bot.send_message(message.chat.id, f"✅ Пользователю {target_id} добавлено {amount} поисков.\nТеперь у него: {new_limit} поисков.", reply_markup=welcome_buttons(message.from_user.id))
         else:
-            bot.send_message(message.chat.id, "❌ Пользователь не найден (он должен нажать /start).", reply_markup=welcome_buttons(message.from_user.id))
+            bot.send_message(message.chat.id, "❌ Пользователь не найден.", reply_markup=welcome_buttons(message.from_user.id))
         conn.close()
     except:
         bot.send_message(message.chat.id, "❌ Ошибка. Введите только цифры.", reply_markup=welcome_buttons(message.from_user.id))
 
-# ===== АРТҚА =====
+# ===== НАЗАД =====
 @bot.message_handler(func=lambda m: m.text == "🔙 Назад")
 def go_back(message):
     bot.send_message(message.chat.id, "Главное меню:", reply_markup=welcome_buttons(message.from_user.id))
 
-# ===== ІСКЕ ҚОСУ =====
+# ===== ЗАПУСК =====
 if __name__ == "__main__":
-    init_db()
-    # download_file_from_telegram() # Файлды жүктеу функциясын қосыңыз
-    print("Whitless Company Bot запущен!")
-    bot.infinity_polling(skip_pending=True, timeout=30)
+    if not TOKEN or not ZIP_URL or not CREATOR_ID:
+        print("❌ ҚАТЕ: Railway-де TOKEN, CREATOR_ID немесе ZIP_URL өзгермелілері қосылмаған!")
+    else:
+        init_db()
+        prepare_data()
+        print("Whitless Company Bot запущен!")
+        bot.infinity_polling(skip_pending=True, timeout=30)
