@@ -14,39 +14,42 @@ from datetime import datetime
 # ===== НАСТРОЙКИ =====
 TOKEN = os.environ.get("TOKEN")
 CREATOR_ID = int(os.environ.get("CREATOR_ID", 0))
-ZIP_URL = os.environ.get("ZIP_URL")
+ZIP_URL_1 = os.environ.get("ZIP_URL")       # 1-ші базаның сілтемесі
+ZIP_URL_2 = os.environ.get("ZIP_URL_2")     # 2-ші базаның сілтемесі
 CRYPTO_PAY_TOKEN = os.environ.get("CRYPTO_PAY_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-BOT_USERNAME = "WhitlessNet_Bot" 
-
-CSV_FILE = "data.csv"
-ZIP_FILE = "data.zip"
+BOT_USERNAME = "WhitlessNet_Bot" # ⚠️ Егер боттың аты басқаша болса, өзгертіңіз
 
 bot = telebot.TeleBot(TOKEN)
 
-# ===== ФАЙЛДЫ ЖҮКТЕУ ЖӘНЕ АШУ =====
+# ===== ФАЙЛДАРДЫ ЖҮКТЕУ ЖӘНЕ АШУ =====
 def prepare_data():
-    global CSV_FILE
-    existing_csv = glob.glob("*.csv") + glob.glob("*/*.csv")
-    if existing_csv:
-        CSV_FILE = existing_csv[0]
-        print(f"✅ База данных найдена: {CSV_FILE}")
-        return
+    # 1-ші базаны дайындау
+    if not os.path.exists("db1"):
+        os.makedirs("db1")
+    if not glob.glob("db1/*.csv"):
+        print("⏳ Загрузка Базы 1...")
+        try:
+            urllib.request.urlretrieve(ZIP_URL_1, "db1.zip")
+            with zipfile.ZipFile("db1.zip", 'r') as zip_ref:
+                zip_ref.extractall("db1")
+            os.remove("db1.zip")
+            print("✅ База 1 готова!")
+        except Exception as e: print(f"❌ Ошибка Базы 1: {e}")
 
-    print("⏳ Загрузка файла базы данных с GitHub...")
-    try:
-        urllib.request.urlretrieve(ZIP_URL, ZIP_FILE)
-        print("✅ Загрузка завершена. Распаковка...")
-        with zipfile.ZipFile(ZIP_FILE, 'r') as zip_ref:
-            zip_ref.extractall(".") 
-            
-        existing_csv = glob.glob("*.csv") + glob.glob("*/*.csv")
-        if existing_csv:
-            CSV_FILE = existing_csv[0]
-            print(f"✅ База данных готова: {CSV_FILE}")
-        os.remove(ZIP_FILE)
-    except Exception as e:
-        print(f"❌ Ошибка загрузки: {e}")
+    # 2-ші базаны дайындау
+    if ZIP_URL_2:
+        if not os.path.exists("db2"):
+            os.makedirs("db2")
+        if not glob.glob("db2/*.csv"):
+            print("⏳ Загрузка Базы 2...")
+            try:
+                urllib.request.urlretrieve(ZIP_URL_2, "db2.zip")
+                with zipfile.ZipFile("db2.zip", 'r') as zip_ref:
+                    zip_ref.extractall("db2")
+                os.remove("db2.zip")
+                print("✅ База 2 готова!")
+            except Exception as e: print(f"❌ Ошибка Базы 2: {e}")
 
 # ===== БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ (PostgreSQL) =====
 def get_db_connection():
@@ -56,7 +59,6 @@ def get_db_connection():
 def init_db():
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Жаңа бағандар қосылды (is_banned)
     cursor.execute('''CREATE TABLE IF NOT EXISTS users (
         user_id BIGINT PRIMARY KEY,
         first_name TEXT,
@@ -68,14 +70,9 @@ def init_db():
         ref_earnings INTEGER DEFAULT 0,
         is_banned INTEGER DEFAULT 0
     )''')
-    # Ескі база болса, бағанды қосу
-    try:
-        cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned INTEGER DEFAULT 0")
+    try: cursor.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_banned INTEGER DEFAULT 0")
     except: pass
-    
-    cursor.execute('''CREATE TABLE IF NOT EXISTS processed_invoices (
-        invoice_id TEXT PRIMARY KEY
-    )''')
+    cursor.execute('''CREATE TABLE IF NOT EXISTS processed_invoices (invoice_id TEXT PRIMARY KEY)''')
     conn.commit()
     cursor.close()
     conn.close()
@@ -113,8 +110,7 @@ def update_user_field(user_id, field, value):
 
 def check_premium_status(user_id):
     user = get_user(user_id)
-    if user and user[3] > int(time.time()):
-        return True
+    if user and user[3] > int(time.time()): return True
     return False
 
 # ===== РЕФЕРАЛДЫҚ СИСТЕМА =====
@@ -123,13 +119,11 @@ def process_referral_bonus(buyer_id, purchase_type):
     if not user: return
     referrer_id = user[6]
     if referrer_id == 0 or referrer_id == buyer_id: return
-    
     bonus = 0
     if purchase_type == "req_10": bonus = 1
     elif purchase_type == "req_20": bonus = 2
     elif purchase_type.startswith("custom_"): bonus = int(int(purchase_type.split('_')[1]) * 0.1)
     elif purchase_type.startswith("prem_"): bonus = 10
-        
     if bonus > 0:
         ref_user = get_user(referrer_id)
         if ref_user:
@@ -163,14 +157,15 @@ def check_crypto_invoice(invoice_id):
 # ===== КЛАВИАТУРАЛАР =====
 def welcome_buttons(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
-    markup.row(types.KeyboardButton("🔍 Поиск данных"), types.KeyboardButton("💎 Купить доступ"))
-    markup.row(types.KeyboardButton("👥 Рефералы"), types.KeyboardButton("👤 Мой профиль"))
+    # 3 ТҮРЛІ ІЗДЕУ БАТЫРМАСЫ
+    markup.row(types.KeyboardButton("🔍 База 1"), types.KeyboardButton("🔍 База 2"))
+    markup.row(types.KeyboardButton("🌟 Обе Базы (Premium)"))
+    markup.row(types.KeyboardButton("💎 Купить доступ"), types.KeyboardButton("👥 Рефералы"))
+    markup.row(types.KeyboardButton("👤 Мой профиль"), types.KeyboardButton("ℹ️ Информация"))
     
     user = get_user(user_id)
     if user and (user[4] == 1 or user_id == CREATOR_ID):
-        markup.row(types.KeyboardButton("⚙️ Админ-панель"), types.KeyboardButton("ℹ️ Информация"))
-    else:
-        markup.row(types.KeyboardButton("ℹ️ Информация"))
+        markup.row(types.KeyboardButton("⚙️ Админ-панель"))
     return markup
 
 def back_button():
@@ -178,7 +173,7 @@ def back_button():
     markup.add(types.KeyboardButton("🔙 Назад"))
     return markup
 
-# ===== БАСТАУ =====
+# ===== СТАРТ =====
 @bot.message_handler(commands=["start"])
 def start(message):
     referrer_id = 0
@@ -187,11 +182,11 @@ def start(message):
     register_user(message, referrer_id)
     
     user = get_user(message.from_user.id)
-    if user and user[8] == 1: # is_banned
+    if user and user[8] == 1:
         bot.send_message(message.chat.id, "⛔ Вы заблокированы в этом боте.")
         return
 
-    text = "👋 Добро пожаловать в <b>Whitless Company</b>!\n\n✅ Бот готов к поиску. Выберите раздел ниже."
+    text = "👋 Добро пожаловать в <b>Whitless Company</b>!\n\n✅ Выберите базу для поиска:"
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=welcome_buttons(message.from_user.id))
 
 # ===== ПРОФИЛЬ =====
@@ -199,11 +194,9 @@ def start(message):
 def my_account(message):
     user = get_user(message.from_user.id)
     if user[8] == 1: return
-    
     is_prem = check_premium_status(user[0])
     status = "👤 Обычный"
     limit_text = f"{user[5]} запросов"
-    
     if is_prem:
         status = "🌟 Премиум"
         limit_text = "♾ Безлимит"
@@ -212,20 +205,7 @@ def my_account(message):
     elif user[4] == 1 or user[0] == CREATOR_ID:
         status = "👑 Создатель"
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute("SELECT COUNT(*) FROM users WHERE referrer_id = %s", (user[0],))
-    ref_count = cursor.fetchone()[0]
-    cursor.close(); conn.close()
-
-    text = (
-        f"👤 <b>МОЙ ПРОФИЛЬ</b>\n\n"
-        f"🆔 ID: <code>{user[0]}</code>\n"
-        f"📊 Статус: {status}\n"
-        f"🔍 Осталось: {limit_text}\n\n"
-        f"👥 Приглашено друзей: <b>{ref_count}</b>\n"
-        f"💰 Заработано с рефералов: <b>{user[7]}</b>"
-    )
+    text = f"👤 <b>МОЙ ПРОФИЛЬ</b>\n\n🆔 ID: <code>{user[0]}</code>\n📊 Статус: {status}\n🔍 Осталось: {limit_text}\n\n👥 Рефералов: <b>{user[7]}</b>"
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=back_button())
 
 @bot.message_handler(func=lambda m: m.text == "ℹ️ Информация")
@@ -233,20 +213,11 @@ def info(message):
     text = "ℹ️ <b>ИНФОРМАЦИЯ</b>\n\n🏢 Компания: <b>Whitless Company</b>\n🤖 Умный поиск по базам данных."
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=back_button())
 
-# ===== РЕФЕРАЛЫ =====
 @bot.message_handler(func=lambda m: m.text == "👥 Рефералы")
 def referral_menu(message):
     user_id = message.from_user.id
-    user = get_user(user_id)
     ref_link = f"https://t.me/{BOT_USERNAME}?start={user_id}"
-    
-    text = (
-        "👥 <b>РЕФЕРАЛЬНАЯ СИСТЕМА</b>\n\n"
-        "🎁 <b>Бонусы:</b>\n"
-        "• 10% от покупок запросов друга.\n"
-        "• 10 запросов за покупку Премиума другом.\n\n"
-        f"🔗 <b>Ваша ссылка:</b>\n<code>{ref_link}</code>"
-    )
+    text = f"👥 <b>РЕФЕРАЛЫ</b>\n\n🎁 10% от покупок друга.\n\n🔗 <b>Ваша ссылка:</b>\n<code>{ref_link}</code>"
     markup = types.InlineKeyboardMarkup()
     markup.add(types.InlineKeyboardButton("📢 Поделиться", url=f"https://t.me/share/url?url={ref_link}"))
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
@@ -264,22 +235,21 @@ def shop(message):
         types.InlineKeyboardButton("🌟 Премиум 7 дней - $5", callback_data="buy_prem_7"),
         types.InlineKeyboardButton("🌟 Премиум 1 месяц - $20", callback_data="buy_prem_30")
     )
-    bot.send_message(message.chat.id, "💎 <b>Магазин</b>\n\nВыберите товар (оплата USDT):", parse_mode="HTML", reply_markup=markup)
+    bot.send_message(message.chat.id, "💎 <b>Магазин</b>\n\nВыберите товар:", parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('buy_'))
 def process_buy(call):
     action = call.data
-    amount, description, payload = 0, "", ""
-    
-    if action == "buy_req_10": amount=1; description="10 запросов"; payload="req_10"
-    elif action == "buy_req_20": amount=2; description="20 запросов"; payload="req_20"
-    elif action == "buy_prem_7": amount=5; description="Премиум на 7 дней"; payload="prem_7"
-    elif action == "buy_prem_30": amount=20; description="Премиум на 30 дней"; payload="prem_30"
+    amount, desc, payload = 0, "", ""
+    if action == "buy_req_10": amount=1; desc="10 запросов"; payload="req_10"
+    elif action == "buy_req_20": amount=2; desc="20 запросов"; payload="req_20"
+    elif action == "buy_prem_7": amount=5; desc="Премиум 7 дней"; payload="prem_7"
+    elif action == "buy_prem_30": amount=20; desc="Премиум 30 дней"; payload="prem_30"
     elif action == "buy_custom":
         msg = bot.send_message(call.message.chat.id, "Введите количество запросов:")
         bot.register_next_step_handler(msg, process_custom_buy)
         return
-    send_invoice(call.message.chat.id, amount, description, payload)
+    send_invoice(call.message.chat.id, amount, desc, payload)
 
 def process_custom_buy(message):
     try:
@@ -295,14 +265,12 @@ def send_invoice(chat_id, amount, description, payload):
         markup = types.InlineKeyboardMarkup()
         markup.add(types.InlineKeyboardButton("💳 Оплатить", url=invoice["bot_invoice_url"]))
         markup.add(types.InlineKeyboardButton("✅ Проверить оплату", callback_data=f"check_{invoice['invoice_id']}"))
-        text = f"🧾 <b>Счет создан!</b>\n\n📦 {description}\n💰 <b>{amount} USDT</b>\n\n<i>Оплатите и нажмите 'Проверить'.</i>"
-        bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
+        bot.send_message(chat_id, f"🧾 <b>Счет создан!</b>\n\n📦 {description}\n💰 <b>{amount} USDT</b>", parse_mode="HTML", reply_markup=markup)
 
 @bot.callback_query_handler(func=lambda call: call.data.startswith('check_'))
 def check_payment(call):
     invoice_id = call.data.split('_')[1]
     user_id = call.from_user.id
-    
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_invoices WHERE invoice_id = %s", (invoice_id,))
@@ -318,37 +286,42 @@ def check_payment(call):
         if payload.startswith("req_") or payload.startswith("custom_"):
             reqs = int(payload.split('_')[1])
             update_user_field(user_id, "search_limit", user[5] + reqs)
-            success_text = f"✅ Успешно! +{reqs} запросов."
+            success_text = f"✅ +{reqs} запросов."
         elif payload.startswith("prem_"):
             days = int(payload.split('_')[1])
-            new_prem_until = int(time.time()) + (days * 24 * 60 * 60)
-            if user[3] > int(time.time()): new_prem_until = user[3] + (days * 24 * 60 * 60)
-            update_user_field(user_id, "premium_until", new_prem_until)
-            success_text = f"✅ Успешно! Премиум на {days} дней."
-            
+            new_prem = int(time.time()) + (days * 24 * 60 * 60)
+            if user[3] > int(time.time()): new_prem = user[3] + (days * 24 * 60 * 60)
+            update_user_field(user_id, "premium_until", new_prem)
+            success_text = f"✅ Премиум на {days} дней."
         process_referral_bonus(user_id, payload)
-        
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("INSERT INTO processed_invoices (invoice_id) VALUES (%s)", (invoice_id,))
         conn.commit(); cursor.close(); conn.close()
-        
         bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
         bot.send_message(call.message.chat.id, success_text)
     else: bot.answer_callback_query(call.id, "❌ Оплата не поступила.", show_alert=True)
 
-# ===== ІЗДЕУ (ЖАҚСАРТЫЛҒАН) =====
-@bot.message_handler(func=lambda m: m.text == "🔍 Поиск данных")
-def search(message):
-    user = get_user(message.from_user.id)
-    if user[8] == 1: return # Бан
-    if not check_premium_status(user[0]) and user[5] <= 0:
+# ===== ІЗДЕУ ЛОГИКАСЫ (3 ТҮРЛІ) =====
+@bot.message_handler(func=lambda m: m.text in ["🔍 База 1", "🔍 База 2", "🌟 Обе Базы (Premium)"])
+def search_init(message):
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if user[8] == 1: return
+    
+    is_prem = check_premium_status(user_id)
+    
+    if message.text == "🌟 Обе Базы (Premium)" and not is_prem:
+        bot.send_message(message.chat.id, "❌ Поиск по двум базам доступен только для <b>Премиум</b> пользователей!", parse_mode="HTML", reply_markup=back_button())
+        return
+        
+    if not is_prem and user[5] <= 0:
         bot.send_message(message.chat.id, "❌ Закончились запросы.", reply_markup=back_button())
         return
-    msg = bot.send_message(message.chat.id, "🔍 Введите номер, ФИО или ИИН:", reply_markup=back_button())
-    bot.register_next_step_handler(msg, process_search)
 
-def process_search(message):
+    msg = bot.send_message(message.chat.id, "🔍 Введите номер, ФИО или ИИН:", reply_markup=back_button())
+    bot.register_next_step_handler(msg, process_search, message.text)
+
+def process_search(message, search_mode):
     if not message.text or message.text == "🔙 Назад":
         bot.send_message(message.chat.id, "Главное меню:", reply_markup=welcome_buttons(message.from_user.id))
         return
@@ -358,18 +331,27 @@ def process_search(message):
     user = get_user(user_id)
     is_prem = check_premium_status(user_id)
 
-    if not os.path.isfile(CSV_FILE):
-        bot.send_message(message.chat.id, "⏳ База загружается...", reply_markup=welcome_buttons(user_id))
+    if search_mode == "🔍 База 1":
+        files_to_search = glob.glob("db1/*.csv")
+    elif search_mode == "🔍 База 2":
+        files_to_search = glob.glob("db2/*.csv")
+    else: # Обе базы
+        files_to_search = glob.glob("db1/*.csv") + glob.glob("db2/*.csv")
+
+    if not files_to_search:
+        bot.send_message(message.chat.id, "⏳ База загружается или не найдена на сервере...", reply_markup=welcome_buttons(user_id))
         return
 
-    wait_msg = bot.send_message(message.chat.id, "⏳ Идет поиск...")
+    wait_msg = bot.send_message(message.chat.id, f"⏳ Идет поиск ({search_mode})...")
 
     try:
         con = duckdb.connect(database=':memory:')
         digits_only = re.sub(r'[^0-9]', '', raw_query)
         
+        files_str = "[" + ", ".join([f"'{f}'" for f in files_to_search]) + "]"
+        
         if digits_only and len(digits_only) > 5:
-            sql_query = f"SELECT * FROM read_csv('{CSV_FILE}', columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE regexp_replace(line, '[^0-9]', '', 'g') LIKE ? LIMIT 5"
+            sql_query = f"SELECT * FROM read_csv({files_str}, columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE regexp_replace(line, '[^0-9]', '', 'g') LIKE ? LIMIT 5"
             params = [f"%{digits_only}%"]
         else:
             words = [w.lower() for w in raw_query.split() if w]
@@ -378,7 +360,7 @@ def process_search(message):
                 return
             conditions = " AND ".join(["line ILIKE ?"] * len(words))
             params = [f"%{w}%" for w in words]
-            sql_query = f"SELECT * FROM read_csv('{CSV_FILE}', columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE {conditions} LIMIT 5"
+            sql_query = f"SELECT * FROM read_csv({files_str}, columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE {conditions} LIMIT 5"
         
         result = con.execute(sql_query, params).fetchall()
         con.close()
@@ -394,37 +376,30 @@ def process_search(message):
         results_texts = []
         for row in result:
             parts = [p.strip().replace('"', '') for p in row[0].split(',')]
-            # Әдемі форматтау (Автоматты түрде таниды)
             formatted = []
             for p in parts:
                 if not p: continue
-                if len(p) >= 9 and re.match(r'^[\d\+\s\-\(\)]+$', p):
-                    formatted.append(f"📞 <b>Номер:</b> <code>{p}</code>")
-                elif re.match(r'\d{2}[\.\-\/]\d{2}[\.\-\/]\d{4}', p):
-                    formatted.append(f"📅 <b>Дата рож:</b> {p}")
-                elif len(p.split()) >= 2 and not any(c.isdigit() for c in p):
-                    formatted.append(f"👤 <b>ФИО:</b> {p}")
-                else:
-                    formatted.append(f"📌 <b>Данные:</b> {p}")
+                if len(p) >= 9 and re.match(r'^[\d\+\s\-\(\)]+$', p): formatted.append(f"📞 <b>Номер:</b> <code>{p}</code>")
+                elif re.match(r'\d{2}[\.\-\/]\d{2}[\.\-\/]\d{4}', p): formatted.append(f"📅 <b>Дата рож:</b> {p}")
+                elif len(p.split()) >= 2 and not any(c.isdigit() for c in p): formatted.append(f"👤 <b>ФИО:</b> {p}")
+                else: formatted.append(f"📌 <b>Данные:</b> {p}")
             results_texts.append("\n".join(formatted))
 
-        final_text = "✅ <b>РЕЗУЛЬТАТЫ ПОИСКА:</b>\n\n" + "\n\n➖➖➖➖➖➖➖➖➖\n\n".join(results_texts)
+        final_text = f"✅ <b>РЕЗУЛЬТАТЫ ({search_mode}):</b>\n\n" + "\n\n➖➖➖➖➖➖➖➖➖\n\n".join(results_texts)
         bot.send_message(message.chat.id, final_text, parse_mode="HTML", reply_markup=welcome_buttons(user_id))
 
     except Exception as e:
         print("Ошибка DuckDB:", e)
         bot.send_message(message.chat.id, "❌ Ошибка при поиске.", reply_markup=welcome_buttons(message.from_user.id))
 
-# ===== АДМИН ПАНЕЛЬ (ЖАҢА ФУНКЦИЯЛАР) =====
+# ===== АДМИН ПАНЕЛЬ =====
 @bot.message_handler(func=lambda m: m.text == "⚙️ Админ-панель")
 def admin_panel(message):
     user_id = message.from_user.id
     user = get_user(user_id)
-    if not user or (user[4] == 0 and user_id != CREATOR_ID):
-        return
+    if not user or (user[4] == 0 and user_id != CREATOR_ID): return
 
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    conn = get_db_connection(); cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*) FROM users")
     total_users = cursor.fetchone()[0]
     cursor.close(); conn.close()
@@ -457,68 +432,58 @@ def admin_process_id(message, action):
         target_id = int(message.text.strip())
         target_user = get_user(target_id)
         if not target_user:
-            bot.send_message(message.chat.id, "❌ Пользователь не найден (он должен нажать /start).", reply_markup=welcome_buttons(message.from_user.id))
+            bot.send_message(message.chat.id, "❌ Пользователь не найден.", reply_markup=welcome_buttons(message.from_user.id))
             return
 
         if action == "adm_give_prem":
             new_prem_until = int(time.time()) + (30 * 24 * 60 * 60)
             update_user_field(target_id, "premium_until", new_prem_until)
             bot.send_message(message.chat.id, f"✅ Пользователю {target_id} выдан Премиум на 30 дней!", reply_markup=welcome_buttons(message.from_user.id))
-            
         elif action == "adm_remove_prem":
             update_user_field(target_id, "premium_until", 0)
             bot.send_message(message.chat.id, f"✅ У пользователя {target_id} забрали Премиум.", reply_markup=welcome_buttons(message.from_user.id))
-            
         elif action == "adm_ban":
             update_user_field(target_id, "is_banned", 1)
             bot.send_message(message.chat.id, f"⛔ Пользователь {target_id} заблокирован (ЧС).", reply_markup=welcome_buttons(message.from_user.id))
-            
         elif action == "adm_unban":
             update_user_field(target_id, "is_banned", 0)
             bot.send_message(message.chat.id, f"✅ Пользователь {target_id} разблокирован.", reply_markup=welcome_buttons(message.from_user.id))
-            
         elif action == "adm_add_admin":
             update_user_field(target_id, "is_admin", 1)
             bot.send_message(message.chat.id, f"🛡 Пользователь {target_id} теперь Админ!", reply_markup=welcome_buttons(message.from_user.id))
-            
         elif action == "adm_remove_admin":
             update_user_field(target_id, "is_admin", 0)
             bot.send_message(message.chat.id, f"🚫 Пользователь {target_id} больше не Админ.", reply_markup=welcome_buttons(message.from_user.id))
-            
         elif action == "adm_give_searches":
-            msg = bot.send_message(message.chat.id, f"Пользователь {target_id}.\nСколько запросов добавить? (Введите число):")
+            msg = bot.send_message(message.chat.id, f"Пользователь {target_id}.\nСколько запросов добавить?")
             bot.register_next_step_handler(msg, apply_searches, target_id)
-
     except:
         bot.send_message(message.chat.id, "❌ Ошибка. Введите корректный ID.", reply_markup=welcome_buttons(message.from_user.id))
 
 def apply_searches(message, target_id):
     try:
         amount = int(message.text.strip())
-        conn = get_db_connection()
-        cursor = conn.cursor()
+        conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("SELECT search_limit FROM users WHERE user_id = %s", (target_id,))
         result = cursor.fetchone()
         if result:
             new_limit = result[0] + amount
             cursor.execute("UPDATE users SET search_limit = %s WHERE user_id = %s", (new_limit, target_id))
             conn.commit()
-            bot.send_message(message.chat.id, f"✅ Пользователю {target_id} добавлено {amount} запросов.\nВсего: {new_limit}.", reply_markup=welcome_buttons(message.from_user.id))
+            bot.send_message(message.chat.id, f"✅ {target_id} добавлено {amount} запросов. Всего: {new_limit}.", reply_markup=welcome_buttons(message.from_user.id))
         cursor.close(); conn.close()
     except:
-        bot.send_message(message.chat.id, "❌ Ошибка. Введите число.", reply_markup=welcome_buttons(message.from_user.id))
+        bot.send_message(message.chat.id, "❌ Ошибка.", reply_markup=welcome_buttons(message.from_user.id))
 
-# ===== НАЗАД =====
 @bot.message_handler(func=lambda m: m.text == "🔙 Назад")
 def go_back(message):
     bot.send_message(message.chat.id, "Главное меню:", reply_markup=welcome_buttons(message.from_user.id))
 
-# ===== ЗАПУСК =====
 if __name__ == "__main__":
-    if not all([TOKEN, CREATOR_ID, ZIP_URL, CRYPTO_PAY_TOKEN, DATABASE_URL]):
-        print("❌ ОШИБКА: Проверьте переменные (TOKEN, CREATOR_ID, ZIP_URL, CRYPTO_PAY_TOKEN, DATABASE_URL)")
+    if not all([TOKEN, CREATOR_ID, ZIP_URL_1, ZIP_URL_2, CRYPTO_PAY_TOKEN, DATABASE_URL]):
+        print("❌ ОШИБКА: Не хватает переменных в Railway!")
     else:
         init_db()
         prepare_data()
-        print("Whitless Company Bot запущен (PostgreSQL + Новый дизайн)!")
+        print("Whitless Company Bot запущен (2 базы, 3 режима поиска)!")
         bot.infinity_polling(skip_pending=True, timeout=30)
