@@ -8,6 +8,7 @@ import zipfile
 import glob
 import requests
 import time
+import re
 from datetime import datetime
 
 # ===== НАСТРОЙКИ =====
@@ -58,7 +59,6 @@ def init_db():
         is_admin INTEGER DEFAULT 0,
         search_limit INTEGER DEFAULT 1
     )''')
-    # Төленген счеттерді қайталап тексермеу үшін жаңа кесте
     cursor.execute('''CREATE TABLE IF NOT EXISTS processed_invoices (
         invoice_id TEXT PRIMARY KEY
     )''')
@@ -248,9 +248,7 @@ def send_invoice(chat_id, amount, description, payload):
         markup.add(types.InlineKeyboardButton("💳 Оплатить", url=invoice["bot_invoice_url"]))
         markup.add(types.InlineKeyboardButton("✅ Проверить оплату", callback_data=f"check_{invoice['invoice_id']}"))
         
-        # Тырнақша қатесі осы жерде түзетілді
         text = f"🧾 <b>Счет создан!</b>\n\n📦 Товар: <b>{description}</b>\n💰 Сумма: <b>{amount} USDT</b>\n\n<i>Оплатите по кнопке ниже, затем нажмите 'Проверить оплату'.</i>"
-        
         bot.send_message(chat_id, text, parse_mode="HTML", reply_markup=markup)
     else:
         bot.send_message(chat_id, "❌ Ошибка создания счета. Попробуйте позже.")
@@ -260,7 +258,7 @@ def check_payment(call):
     invoice_id = call.data.split('_')[1]
     user_id = call.from_user.id
     
-    # 1. Тексеру: Бұл счет бұрын өңделген бе? (Қайталап басуға қарсы)
+    # Тексеру: Бұл счет бұрын өңделген бе?
     conn = sqlite3.connect(USERS_DB)
     cursor = conn.cursor()
     cursor.execute("SELECT 1 FROM processed_invoices WHERE invoice_id = ?", (invoice_id,))
@@ -269,47 +267,40 @@ def check_payment(call):
 
     if already_processed:
         bot.answer_callback_query(call.id, "✅ Вы уже получили товар по этому счету!", show_alert=True)
-        # Пернетақтаны өшіреміз
         bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
         return
 
-    # 2. Егер өңделмеген болса, CryptoPay-ден тексереміз
+    # CryptoPay-ден тексереміз
     payload = check_crypto_invoice(invoice_id)
     
     if payload:
         user = get_user(user_id)
         
-        # 3. Төлем түрін анықтап, балансты жаңартамыз
         if payload.startswith("req_"):
             reqs = int(payload.split('_')[1])
             update_user_field(user_id, "search_limit", user[5] + reqs)
             success_text = f"✅ Успешно оплачено! Вам добавлено {reqs} запросов."
-            
         elif payload.startswith("custom_"):
             reqs = int(payload.split('_')[1])
             update_user_field(user_id, "search_limit", user[5] + reqs)
             success_text = f"✅ Успешно оплачено! Вам добавлено {reqs} запросов."
-            
         elif payload.startswith("prem_"):
             days = int(payload.split('_')[1])
             new_prem_until = int(time.time()) + (days * 24 * 60 * 60)
             if user[3] > int(time.time()):
                 new_prem_until = user[3] + (days * 24 * 60 * 60)
-                
             update_user_field(user_id, "premium_until", new_prem_until)
             success_text = f"✅ Успешно оплачено! Премиум активирован на {days} дней."
         
-        # 4. Счетті өңделді деп белгілейміз
+        # Счетті өңделді деп белгілейміз
         conn = sqlite3.connect(USERS_DB)
         cursor = conn.cursor()
         cursor.execute("INSERT INTO processed_invoices (invoice_id) VALUES (?)", (invoice_id,))
         conn.commit()
         conn.close()
         
-        # Пернетақтаны өшіріп, сәттілік туралы хабарлама жазамыз
         bot.edit_message_reply_markup(chat_id=call.message.chat.id, message_id=call.message.message_id, reply_markup=None)
         bot.send_message(call.message.chat.id, success_text)
-        
     else:
         bot.answer_callback_query(call.id, "❌ Оплата еще не поступила.", show_alert=True)
 
@@ -324,7 +315,7 @@ def search(message):
         bot.send_message(message.chat.id, "❌ У вас закончились запросы.\nПополните баланс в разделе '💎 Купить доступ'.", reply_markup=back_button())
         return
         
-    msg = bot.send_message(message.chat.id, "🔍 Введите номер, ФИО или ИИН для поиска:", reply_markup=back_button())
+    msg = bot.send_message(message.chat.id, "🔍 Введите номер телефона, ФИО или ИИН для поиска:", reply_markup=back_button())
     bot.register_next_step_handler(msg, process_search)
 
 def process_search(message):
@@ -332,7 +323,7 @@ def process_search(message):
         bot.send_message(message.chat.id, "Главное меню:", reply_markup=welcome_buttons(message.from_user.id))
         return
 
-    query = message.text.strip().lower()
+    raw_query = message.text.strip()
     user_id = message.from_user.id
     user = get_user(user_id)
     is_prem = check_premium_status(user_id)
@@ -344,21 +335,42 @@ def process_search(message):
     wait_msg = bot.send_message(message.chat.id, "⏳ Идет поиск по базе...")
 
     try:
-        # Бос орынмен іздеу логикасы (сөздерді бөліп, бәрі қатар кездесуі керек)
-        words = query.split()
-        conditions = " AND ".join(["line ILIKE ?"] * len(words))
-        params = [f"%{w}%" for w in words]
-        
         con = duckdb.connect(database=':memory:')
-        sql_query = f"""
-            SELECT * FROM read_csv('{CSV_FILE}', 
-            columns={{'line': 'VARCHAR'}}, 
-            delim='\n', 
-            header=False, 
-            quote='', 
-            escape='') 
-            WHERE {conditions} LIMIT 5
-        """
+        
+        # 1. Тек сандарды тазалау (Телефон немесе ИИН іздеу үшін)
+        digits_only = re.sub(r'[^0-9]', '', raw_query)
+        
+        # Егер іздеу сұранысының басым бөлігі сандардан тұрса (ұзындығы 5-тен көп)
+        if digits_only and len(digits_only) > 5:
+            sql_query = f"""
+                SELECT * FROM read_csv('{CSV_FILE}', 
+                columns={{'line': 'VARCHAR'}}, 
+                delim='\n', 
+                header=False, 
+                quote='', 
+                escape='') 
+                WHERE regexp_replace(line, '[^0-9]', '', 'g') LIKE ? LIMIT 5
+            """
+            params = [f"%{digits_only}%"]
+        else:
+            # 2. Әріптермен іздеу (Аты-жөні). Бос орындарды бөлеміз.
+            words = [w.lower() for w in raw_query.split() if w]
+            if not words:
+                bot.send_message(message.chat.id, "❌ Введите корректный запрос.", reply_markup=welcome_buttons(user_id))
+                return
+                
+            conditions = " AND ".join(["line ILIKE ?"] * len(words))
+            params = [f"%{w}%" for w in words]
+            
+            sql_query = f"""
+                SELECT * FROM read_csv('{CSV_FILE}', 
+                columns={{'line': 'VARCHAR'}}, 
+                delim='\n', 
+                header=False, 
+                quote='', 
+                escape='') 
+                WHERE {conditions} LIMIT 5
+            """
         
         result = con.execute(sql_query, params).fetchall()
         con.close()
@@ -369,7 +381,7 @@ def process_search(message):
             bot.send_message(message.chat.id, "❌ Совпадений не найдено.\n(Запрос не был потрачен).", reply_markup=welcome_buttons(user_id))
             return
 
-        # Лимитті шегеру (тек премиум емес болса және табылса)
+        # Лимитті шегеру
         if not is_prem:
             update_user_field(user_id, "search_limit", user[5] - 1)
 
