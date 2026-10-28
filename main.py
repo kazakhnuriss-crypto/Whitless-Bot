@@ -50,7 +50,7 @@ def prepare_data():
 
 # ===== БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ (PostgreSQL) =====
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL, sslmode='require')
+    return psycopg2.connect(DATABASE_URL)
 
 def init_db():
     conn = get_db_connection()
