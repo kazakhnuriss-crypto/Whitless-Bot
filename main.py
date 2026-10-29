@@ -16,11 +16,15 @@ TOKEN = os.environ.get("TOKEN")
 CREATOR_ID = int(os.environ.get("CREATOR_ID", 0))
 ZIP_URL_1 = os.environ.get("ZIP_URL")
 ZIP_URL_2 = os.environ.get("ZIP_URL_2")
+ZIP_URL_3 = os.environ.get("ZIP_URL_3")
 CRYPTO_PAY_TOKEN = os.environ.get("CRYPTO_PAY_TOKEN")
 DATABASE_URL = os.environ.get("DATABASE_URL")
-BOT_USERNAME = "WhitlessNet_Bot" # ⚠️ Егер боттың аты басқаша болса, осында өзгертіңіз
+BOT_USERNAME = "WhitlessNet_Bot"
 
 bot = telebot.TeleBot(TOKEN)
+
+# Іздеу сессияларын уақытша сақтау үшін
+search_sessions = {}
 
 # ===== ФАЙЛДАРДЫ ЖҮКТЕУ ЖӘНЕ АШУ =====
 def prepare_data():
@@ -44,6 +48,17 @@ def prepare_data():
                 os.remove("db2.zip")
                 print("✅ База 2 готова!")
             except Exception as e: print(f"❌ Ошибка Базы 2: {e}")
+
+    if ZIP_URL_3:
+        if not os.path.exists("db3"): os.makedirs("db3")
+        if not glob.glob("db3/*.csv"):
+            print("⏳ Загрузка Базы 3 (Telegram)...")
+            try:
+                urllib.request.urlretrieve(ZIP_URL_3, "db3.zip")
+                with zipfile.ZipFile("db3.zip", 'r') as zip_ref: zip_ref.extractall("db3")
+                os.remove("db3.zip")
+                print("✅ База 3 (Telegram) готова!")
+            except Exception as e: print(f"❌ Ошибка Базы 3: {e}")
 
 # ===== БАЗА ДАННЫХ ПОЛЬЗОВАТЕЛЕЙ (PostgreSQL) =====
 def get_db_connection():
@@ -91,25 +106,6 @@ def check_premium_status(user_id):
     if user and user[3] > int(time.time()): return True
     return False
 
-# ===== РЕФЕРАЛДЫҚ СИСТЕМА =====
-def process_referral_bonus(buyer_id, purchase_type):
-    user = get_user(buyer_id)
-    if not user: return
-    referrer_id = user[6]
-    if referrer_id == 0 or referrer_id == buyer_id: return
-    bonus = 0
-    if purchase_type == "req_10": bonus = 1
-    elif purchase_type == "req_20": bonus = 2
-    elif purchase_type.startswith("custom_"): bonus = int(int(purchase_type.split('_')[1]) * 0.1)
-    elif purchase_type.startswith("prem_"): bonus = 10
-    if bonus > 0:
-        ref_user = get_user(referrer_id)
-        if ref_user:
-            update_user_field(referrer_id, "search_limit", ref_user[5] + bonus)
-            update_user_field(referrer_id, "ref_earnings", ref_user[7] + bonus)
-            try: bot.send_message(referrer_id, f"🎉 <b>Реферальный бонус!</b>\n\nВам начислено: <b>+{bonus} запросов</b>!", parse_mode="HTML")
-            except: pass
-
 # ===== CRYPTOPAY API =====
 def create_crypto_invoice(amount, description, payload):
     url = "https://pay.crypt.bot/api/createInvoice"
@@ -136,7 +132,7 @@ def check_crypto_invoice(invoice_id):
 def welcome_buttons(user_id):
     markup = types.ReplyKeyboardMarkup(resize_keyboard=True)
     markup.row(types.KeyboardButton("🔍 База 1"), types.KeyboardButton("🔍 База 2"))
-    markup.row(types.KeyboardButton("🌟 Обе Базы (Premium)"))
+    markup.row(types.KeyboardButton("📱 Поиск по Телеграм"), types.KeyboardButton("🌐 Поиск по всем (Premium)"))
     markup.row(types.KeyboardButton("💎 Купить доступ"), types.KeyboardButton("👥 Рефералы"))
     markup.row(types.KeyboardButton("👤 Мой профиль"), types.KeyboardButton("ℹ️ Информация"))
     
@@ -166,7 +162,7 @@ def start(message):
     text = "👋 Добро пожаловать в <b>Whitless Company</b>!\n\n✅ Выберите базу для поиска:"
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=welcome_buttons(message.from_user.id))
 
-# ===== ПРОФИЛЬ =====
+# ===== ПРОФИЛЬ, ИНФО, РЕФЕРАЛЫ, МАГАЗИН =====
 @bot.message_handler(func=lambda m: m.text == "👤 Мой профиль")
 def my_account(message):
     user = get_user(message.from_user.id)
@@ -199,7 +195,6 @@ def referral_menu(message):
     markup.add(types.InlineKeyboardButton("📢 Поделиться", url=f"https://t.me/share/url?url={ref_link}"))
     bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=markup)
 
-# ===== МАГАЗИН =====
 @bot.message_handler(func=lambda m: m.text == "💎 Купить доступ")
 def shop(message):
     markup = types.InlineKeyboardMarkup(row_width=2)
@@ -269,7 +264,7 @@ def check_payment(call):
             if user[3] > int(time.time()): new_prem = user[3] + (days * 24 * 60 * 60)
             update_user_field(user_id, "premium_until", new_prem)
             success_text = f"✅ Премиум на {days} дней."
-        process_referral_bonus(user_id, payload)
+        
         conn = get_db_connection(); cursor = conn.cursor()
         cursor.execute("INSERT INTO processed_invoices (invoice_id) VALUES (%s)", (invoice_id,))
         conn.commit(); cursor.close(); conn.close()
@@ -277,67 +272,24 @@ def check_payment(call):
         bot.send_message(call.message.chat.id, success_text)
     else: bot.answer_callback_query(call.id, "❌ Оплата не поступила.", show_alert=True)
 
+
 # ===== ІЗДЕУ ЛОГИКАСЫ =====
-@bot.message_handler(func=lambda m: m.text in ["🔍 База 1", "🔍 База 2", "🌟 Обе Базы (Premium)"])
+@bot.message_handler(func=lambda m: m.text in ["🔍 База 1", "🔍 База 2", "📱 Поиск по Телеграм", "🌐 Поиск по всем (Premium)"])
 def search_init(message):
     user_id = message.from_user.id
     user = get_user(user_id)
     if user[8] == 1: return
     
     is_prem = check_premium_status(user_id)
-    if message.text == "🌟 Обе Базы (Premium)" and not is_prem:
-        bot.send_message(message.chat.id, "❌ Поиск по двум базам доступен только для <b>Премиум</b> пользователей!", parse_mode="HTML", reply_markup=back_button())
+    if message.text == "🌐 Поиск по всем (Premium)" and not is_prem:
+        bot.send_message(message.chat.id, "❌ Поиск по всем базам доступен только для <b>Премиум</b>!", parse_mode="HTML", reply_markup=back_button())
         return
     if not is_prem and user[5] <= 0:
         bot.send_message(message.chat.id, "❌ Закончились запросы.", reply_markup=back_button())
         return
 
-    msg = bot.send_message(message.chat.id, "🔍 Введите номер, ФИО или ИИН:", reply_markup=back_button())
+    msg = bot.send_message(message.chat.id, "🔍 Введите номер, ФИО, ИИН, Email или @username:", reply_markup=back_button())
     bot.register_next_step_handler(msg, process_search, message.text)
-
-# АҚЫЛДЫ ФОРМАТТАУШЫ ФУНКЦИЯ
-def format_smart_data(raw_line):
-    # Бөлгішті анықтау (үтір немесе нүктелі үтір)
-    delimiter = ';' if raw_line.count(';') > raw_line.count(',') else ','
-    parts = [p.strip().replace('"', '') for p in raw_line.split(delimiter) if p.strip()]
-    
-    formatted = []
-    for p in parts:
-        p_upper = p.upper()
-        
-        # 1. Мекенжай (Область, Город, Улица т.б.)
-        if any(w in p_upper for w in ["ОБЛАСТЬ", "ГОРОД", "РАЙОН", "УЛИЦА", "ДОМ", "МИКРОРАЙОН", "АУЛ", "СЕЛО", "РЕСПУБЛИКА", "КНР", "КАЗАХСТАН", "ПРОСПЕКТ", "ПЕР."]):
-            formatted.append(f"📍 <b>Адрес:</b> {p}")
-            
-        # 2. Жынысы
-        elif p_upper in ["МУЖСКОЙ", "ЖЕНСКИЙ", "М", "Ж"]:
-            formatted.append(f"🚻 <b>Пол:</b> {p}")
-            
-        # 3. Телефон нөмірі (+7, 8, скобка немесе сызықша бар сандар)
-        elif re.match(r'^[\+\d][\d\s\-\(\)]{8,}$', p) and not re.match(r'^\d{10,14}$', p):
-            formatted.append(f"📞 <b>Номер:</b> <code>{p}</code>")
-            
-        # 4. Туған күні (Дата)
-        elif re.match(r'^\d{4}-\d{2}-\d{2}', p) or re.match(r'^\d{2}[\.\-\/]\d{2}[\.\-\/]\d{4}', p):
-            formatted.append(f"📅 <b>Дата рож:</b> {p}")
-            
-        # 5. ИИН / Паспорт (Тек қана 10-14 саннан тұрса)
-        elif p.isdigit() and 10 <= len(p) <= 14:
-            formatted.append(f"🆔 <b>ИИН/Паспорт:</b> <code>{p}</code>")
-            
-        # 6. Жүйелік деректер (TRUE/FALSE немесе уақыты бар дата)
-        elif "TRUE" in p_upper or "FALSE" in p_upper or re.match(r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}', p):
-            formatted.append(f"⚙️ <b>Статус:</b> {p}")
-            
-        # 7. ФИО (Егер әріптерден тұрса және цифр болмаса)
-        elif re.match(r'^[А-Яа-яЁёҚқҒғҮүҰұӨөӘәІіҢң\s\-]+$', p) and not any(c.isdigit() for c in p):
-            formatted.append(f"👤 <b>ФИО/Имя:</b> {p}")
-            
-        # 8. Қалғандары
-        else:
-            formatted.append(f"📌 <b>Данные:</b> {p}")
-            
-    return "\n".join(formatted)
 
 def process_search(message, search_mode):
     if not message.text or message.text == "🔙 Назад":
@@ -351,7 +303,8 @@ def process_search(message, search_mode):
 
     if search_mode == "🔍 База 1": files_to_search = glob.glob("db1/*.csv")
     elif search_mode == "🔍 База 2": files_to_search = glob.glob("db2/*.csv")
-    else: files_to_search = glob.glob("db1/*.csv") + glob.glob("db2/*.csv")
+    elif search_mode == "📱 Поиск по Телеграм": files_to_search = glob.glob("db3/*.csv")
+    else: files_to_search = glob.glob("db1/*.csv") + glob.glob("db2/*.csv") + glob.glob("db3/*.csv")
 
     if not files_to_search:
         bot.send_message(message.chat.id, "⏳ База загружается...", reply_markup=welcome_buttons(user_id))
@@ -361,12 +314,19 @@ def process_search(message, search_mode):
 
     try:
         con = duckdb.connect(database=':memory:')
-        digits_only = re.sub(r'[^0-9]', '', raw_query)
         files_str = "[" + ", ".join([f"'{f}'" for f in files_to_search]) + "]"
         
-        if digits_only and len(digits_only) > 5:
-            sql_query = f"SELECT * FROM read_csv({files_str}, columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE regexp_replace(line, '[^0-9]', '', 'g') LIKE ? LIMIT 5"
+        # ШЕКТЕУДІ 1000-ҒА КӨТЕРДІК
+        if "@" in raw_query and "." in raw_query:
+            sql_query = f"SELECT * FROM read_csv({files_str}, columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE line ILIKE ? LIMIT 1000"
+            params = [f"%{raw_query}%"]
+        elif raw_query.replace('+', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '').isdigit():
+            digits_only = re.sub(r'[^0-9]', '', raw_query)
+            sql_query = f"SELECT * FROM read_csv({files_str}, columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE regexp_replace(line, '[^0-9]', '', 'g') LIKE ? LIMIT 1000"
             params = [f"%{digits_only}%"]
+        elif raw_query.startswith('@'):
+            sql_query = f"SELECT * FROM read_csv({files_str}, columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE line ILIKE ? LIMIT 1000"
+            params = [f"%{raw_query}%"]
         else:
             words = [w.lower() for w in raw_query.split() if w]
             if not words:
@@ -374,7 +334,7 @@ def process_search(message, search_mode):
                 return
             conditions = " AND ".join(["line ILIKE ?"] * len(words))
             params = [f"%{w}%" for w in words]
-            sql_query = f"SELECT * FROM read_csv({files_str}, columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE {conditions} LIMIT 5"
+            sql_query = f"SELECT * FROM read_csv({files_str}, columns={{'line': 'VARCHAR'}}, delim='\n', header=False, quote='', escape='') WHERE {conditions} LIMIT 1000"
         
         result = con.execute(sql_query, params).fetchall()
         con.close()
@@ -386,17 +346,176 @@ def process_search(message, search_mode):
 
         if not is_prem: update_user_field(user_id, "search_limit", user[5] - 1)
 
-        results_texts = []
-        for row in result:
-            # Жаңа ақылды функцияны шақырамыз
-            results_texts.append(format_smart_data(row[0]))
+        # Нәтижелерді сессияға сақтаймыз
+        raw_lines = [row[0] for row in result]
+        search_sessions[user_id] = {
+            "lines": raw_lines,
+            "mode": search_mode,
+            "current_idx": 0
+        }
 
-        final_text = f"✅ <b>РЕЗУЛЬТАТЫ ({search_mode}):</b>\n\n" + "\n\n➖➖➖➖➖➖➖➖➖\n\n".join(results_texts)
-        bot.send_message(message.chat.id, final_text, parse_mode="HTML", reply_markup=welcome_buttons(user_id))
+        # Бірінші нәтижені көрсетеміз
+        show_preview(message.chat.id, user_id)
 
     except Exception as e:
         print("Ошибка DuckDB:", e)
         bot.send_message(message.chat.id, "❌ Ошибка при поиске.", reply_markup=welcome_buttons(message.from_user.id))
+
+# ===== НӘТИЖЕНІ КӨРСЕТУ ЖӘНЕ ПАРАҚТАУ =====
+def show_preview(chat_id, user_id, message_id=None):
+    if user_id not in search_sessions:
+        bot.send_message(chat_id, "❌ Сессия истекла. Сделайте поиск заново.")
+        return
+
+    session = search_sessions[user_id]
+    lines = session["lines"]
+    idx = session["current_idx"]
+    total = len(lines)
+    
+    if total == 0: return
+
+    raw_line = lines[idx]
+    
+    # Қысқаша мәлімет алу (Аты, Туған күні, Жасы)
+    clean_line = re.sub(r'[:_\.\;]', ' ', raw_line)
+    parts = clean_line.split()
+    
+    name_parts = []
+    dob = ""
+    age_text = ""
+    
+    for p in parts:
+        if re.match(r'^\d{2}\.\d{2}\.\d{4}$', p):
+            dob = p
+        elif re.match(r'^[А-Яа-яЁёҚқҒғҮүҰұӨөӘәІіҢң\-]+$', p) and len(name_parts) < 3:
+            name_parts.append(p)
+            
+    name_str = " ".join(name_parts) if name_parts else "Неизвестно"
+    
+    if dob:
+        try:
+            b_date = datetime.strptime(dob, '%d.%m.%Y')
+            today = datetime.today()
+            age = today.year - b_date.year - ((today.month, today.day) < (b_date.month, b_date.day))
+            age_text = f"\n\n<b>Возраст:</b> {age} лет"
+        except: pass
+
+    preview_text = (
+        f"👤 <b>{name_str} {dob}</b>"
+        f"{age_text}\n\n"
+        f"<i>Предварительное совпадение найдено.</i>\n"
+        f"<i>Полная информация доступна по кнопке ниже.</i>"
+    )
+
+    # Инлайн батырмалар
+    markup = types.InlineKeyboardMarkup(row_width=3)
+    
+    # 1. Досье алу
+    btn_dossier = types.InlineKeyboardButton("📄 Получить досье на человека", callback_data=f"dos_{user_id}_{idx}")
+    markup.row(btn_dossier)
+    
+    # 2. Парақтау батырмалары (1000-ға дейін жұмыс істейді)
+    btn_prev = types.InlineKeyboardButton("◀️", callback_data=f"nav_{user_id}_{idx-1}") if idx > 0 else types.InlineKeyboardButton(" ", callback_data="ignore")
+    btn_counter = types.InlineKeyboardButton(f"{idx+1} / {total}", callback_data="ignore")
+    btn_next = types.InlineKeyboardButton("▶️", callback_data=f"nav_{user_id}_{idx+1}") if idx < total - 1 else types.InlineKeyboardButton(" ", callback_data="ignore")
+    
+    markup.row(btn_prev, btn_counter, btn_next)
+    
+    # 3. Іздеуді өзгерту
+    btn_change = types.InlineKeyboardButton("🔄 Изменить данные поиска", callback_data="change_search")
+    markup.row(btn_change)
+
+    if message_id:
+        try:
+            bot.edit_message_text(preview_text, chat_id, message_id, parse_mode="HTML", reply_markup=markup)
+        except:
+            pass
+    else:
+        bot.send_message(chat_id, preview_text, parse_mode="HTML", reply_markup=markup)
+
+# Инлайн батырмаларды өңдеу
+@bot.callback_query_handler(func=lambda call: call.data.startswith('nav_') or call.data.startswith('dos_') or call.data == 'change_search')
+def handle_callbacks(call):
+    user_id = call.from_user.id
+    data = call.data.split('_')
+
+    if call.data == 'change_search':
+        bot.delete_message(call.message.chat.id, call.message.message_id)
+        msg = bot.send_message(call.message.chat.id, "🔍 Введите новый запрос для поиска:")
+        bot.register_next_step_handler(msg, lambda m: process_search(m, "🌐 Поиск по всем (Premium)")) 
+        return
+
+    if call.data == 'ignore':
+        return
+
+    action = data[0]
+    
+    if action == "nav":
+        new_idx = int(data[2])
+        if user_id in search_sessions:
+            if 0 <= new_idx < len(search_sessions[user_id]["lines"]):
+                search_sessions[user_id]["current_idx"] = new_idx
+                show_preview(call.message.chat.id, user_id, call.message.message_id)
+        else:
+            bot.answer_callback_query(call.id, "❌ Сессия истекла", show_alert=True)
+
+    elif action == "dos":
+        idx = int(data[2])
+        if user_id in search_sessions and idx < len(search_sessions[user_id]["lines"]):
+            raw_line = search_sessions[user_id]["lines"][idx]
+            dossier_text = format_full_dossier(raw_line)
+            
+            bot.send_message(call.message.chat.id, f"📄 <b>ПОЛНОЕ ДОСЬЕ:</b>\n\n{dossier_text}", parse_mode="HTML")
+            bot.answer_callback_query(call.id)
+        else:
+            bot.answer_callback_query(call.id, "❌ Данные не найдены", show_alert=True)
+
+# ===== ТОЛЫҚ ФОРМАТТАУШЫ (ДОСЬЕ) =====
+def format_full_dossier(raw_line):
+    raw_line = re.sub(r'[:_\.]', ' ', raw_line)
+    delimiter = ';' if raw_line.count(';') > raw_line.count(',') else ','
+    parts = [p.strip().replace('"', '') for p in raw_line.split(delimiter) if p.strip()]
+    
+    data = {
+        "ФИО": [], "НОМЕР": [], "АЙДИ": [], "ЮЗЕРНЕЙМ": [], 
+        "МЕСТО ПРОЖИВАНИЕ": [], "ДАТА РОЖДЕНИЕ": [], "ИНН": [], "ДРУГОЕ": []
+    }
+    
+    for p in parts:
+        p_upper = p.upper()
+        
+        if re.match(r'^[\w\.-]+@[\w\.-]+\.\w+$', p):
+            data["ДРУГОЕ"].append(p)
+        elif p.startswith('@') or 't.me/' in p:
+            data["ЮЗЕРНЕЙМ"].append(p)
+        elif re.match(r'^[\+\d][\d\s\-\(\)]{8,}$', p) and not re.match(r'^\d{9,10}$', p):
+            data["НОМЕР"].append(p)
+        elif p.isdigit() and 8 <= len(p) <= 11:
+            data["АЙДИ"].append(p)
+        elif p.isdigit() and 12 <= len(p) <= 14:
+            data["ИНН"].append(p)
+        elif any(w in p_upper for w in ["ОБЛАСТЬ", "ГОРОД", "РАЙОН", "УЛИЦА", "ДОМ", "МИКРОРАЙОН", "АУЛ", "СЕЛО", "РЕСПУБЛИКА", "КНР", "КАЗАХСТАН", "ПРОСПЕКТ"]):
+            data["МЕСТО ПРОЖИВАНИЕ"].append(p)
+        elif re.match(r'^\d{4}-\d{2}-\d{2}', p) or re.match(r'^\d{2}\.\d{2}\.\d{4}', p):
+            data["ДАТА РОЖДЕНИЕ"].append(p)
+        elif p_upper in ["МУЖСКОЙ", "ЖЕНСКИЙ", "М", "Ж"]:
+            data["ДРУГОЕ"].append(f"Пол: {p}")
+        elif re.match(r'^[А-Яа-яЁёҚқҒғҮүҰұӨөӘәІіҢң\s\-]+$', p) and not any(c.isdigit() for c in p):
+            data["ФИО"].append(p)
+        else:
+            data["ДРУГОЕ"].append(p)
+            
+    res = ""
+    if data["ФИО"]: res += f"👤 <b>ФИО:</b> {' '.join(data['ФИО'])}\n"
+    if data["НОМЕР"]: res += f"📞 <b>НОМЕР:</b> {' | '.join(data['НОМЕР'])}\n"
+    if data["АЙДИ"]: res += f"🆔 <b>АЙДИ:</b> {' | '.join(data['АЙДИ'])}\n"
+    if data["ЮЗЕРНЕЙМ"]: res += f"✈️ <b>ЮЗЕРНЕЙМ:</b> {' | '.join(data['ЮЗЕРНЕЙМ'])}\n"
+    if data["МЕСТО ПРОЖИВАНИЕ"]: res += f"📍 <b>МЕСТО ПРОЖИВАНИЕ:</b> {' '.join(data['МЕСТО ПРОЖИВАНИЕ'])}\n"
+    if data["ДАТА РОЖДЕНИЕ"]: res += f"📅 <b>ДАТА РОЖДЕНИЕ:</b> {' | '.join(data['ДАТА РОЖДЕНИЕ'])}\n"
+    if data["ИНН"]: res += f"🪪 <b>ИНН:</b> {' | '.join(data['ИНН'])}\n"
+    if data["ДРУГОЕ"]: res += f"📌 <b>ДРУГОЕ:</b> {' | '.join(data['ДРУГОЕ'])}\n"
+    
+    return res
 
 # ===== АДМИН ПАНЕЛЬ =====
 @bot.message_handler(func=lambda m: m.text == "⚙️ Админ-панель")
@@ -486,10 +605,10 @@ def go_back(message):
     bot.send_message(message.chat.id, "Главное меню:", reply_markup=welcome_buttons(message.from_user.id))
 
 if __name__ == "__main__":
-    if not all([TOKEN, CREATOR_ID, ZIP_URL_1, ZIP_URL_2, CRYPTO_PAY_TOKEN, DATABASE_URL]):
+    if not all([TOKEN, CREATOR_ID, ZIP_URL_1, ZIP_URL_2, ZIP_URL_3, CRYPTO_PAY_TOKEN, DATABASE_URL]):
         print("❌ ОШИБКА: Не хватает переменных в Railway!")
     else:
         init_db()
         prepare_data()
-        print("Whitless Company Bot запущен (Умный поиск)!")
+        print("Whitless Company Bot запущен (До 1000 результатов)!")
         bot.infinity_polling(skip_pending=True, timeout=30)
